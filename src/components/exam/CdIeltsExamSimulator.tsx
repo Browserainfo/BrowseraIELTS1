@@ -49,6 +49,9 @@ import {
   getListeningBand, 
   evaluateAnswer 
 } from '../../utils/ieltsScoring';
+import { useListeningAudioPlayer } from '../../hooks/useListeningAudioPlayer';
+import { formatAudioTime } from '../../utils/listeningAudio';
+import { findPassageIndexForQuestion, getPassageQuestionRange } from '../../utils/readingPassages';
 
 interface CdIeltsExamSimulatorProps {
   currentUser: User;
@@ -145,8 +148,37 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
     speaking: false,
   });
 
-  // Audio / Speaking specific state
-  const [audioPlaying, setAudioPlaying] = useState(false);
+  const currentPassages = currentReadingTest.passages || [
+    {
+      passageNumber: 1,
+      title: currentReadingTest.passageTitle,
+      subtitle: currentReadingTest.passageSubtitle,
+      text: currentReadingTest.passageText,
+      questions: currentReadingTest.questions
+    }
+  ];
+
+  // Active Section in Listening (Section 1: 1–10, Section 2: 11–20, Section 3: 21–30, Section 4: 31–40)
+  const activeListeningSection = currentListeningTest.sections[activeListeningSectionIndex] || currentListeningTest.sections[0];
+  const listeningSectionKey = `${currentListeningTest.id}_sec_${activeListeningSectionIndex}`;
+  const [completedListeningSections, setCompletedListeningSections] = useState<Record<string, boolean>>({});
+
+  // Reliable Listening audio playback with buffering/stall detection, auto-recovery & single-play lock
+  const listeningPlayer = useListeningAudioPlayer({
+    sectionKey: listeningSectionKey,
+    transcript: activeListeningSection?.transcript || '',
+    audioScenario: activeListeningSection?.audioScenario,
+    audioDurationSeconds: activeListeningSection?.audioDurationSeconds || 180,
+    audioUrl: (currentListeningTest as any).audioSimulatedUrl,
+    isActive: !assignedLoadError && !isTestSubmitted && activeModule === 'listening' && pendingAudioCheckModule === null,
+    singlePlay: true,
+    isLockedCompleted: Boolean(completedListeningSections[listeningSectionKey]),
+    onSectionCompleted: (completedKey) => {
+      setCompletedListeningSections(prev => (prev[completedKey] ? prev : { ...prev, [completedKey]: true }));
+    }
+  });
+
+  // Speaking specific state
   const [speakingPrepTime, setSpeakingPrepTime] = useState(60);
   const [speakingPrepActive, setSpeakingPrepActive] = useState(false);
   const [speakingRecording, setSpeakingRecording] = useState(false);
@@ -182,21 +214,16 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
     return () => clearInterval(timer);
   }, [assignedLoadError, secondsRemaining, isTestSubmitted, pendingAudioCheckModule]);
 
-  // Synchronize active passage/section when activeQuestionNumber changes
+  // Synchronize active passage/section when activeQuestionNumber changes (supports GT 1-14/15-27/28-40 & Academic 1-13/14-26/27-40)
   useEffect(() => {
     if (activeModule === 'reading') {
-      if (activeQuestionNumber <= 13) {
-        setActiveReadingPassageIndex(0);
-      } else if (activeQuestionNumber <= 26) {
-        setActiveReadingPassageIndex(1);
-      } else {
-        setActiveReadingPassageIndex(2);
-      }
+      setActiveReadingPassageIndex(findPassageIndexForQuestion(currentPassages, activeQuestionNumber));
     } else if (activeModule === 'listening') {
       const sectionIdx = Math.min(3, Math.floor((activeQuestionNumber - 1) / 10));
       setActiveListeningSectionIndex(sectionIdx);
     }
-  }, [activeQuestionNumber, activeModule]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeQuestionNumber, activeModule, currentReadingTest.id]);
 
   // Handle module switching with hardware check gating (locked when in assigned test mode)
   const handleSelectModule = (mod: ExamModule) => {
@@ -510,20 +537,7 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
     ? currentReadingTest.questions 
     : allListeningQuestions;
 
-  // Active Passage in Reading (Passage 1: 1–13, Passage 2: 14–26, Passage 3: 27–40)
-  const currentPassages = currentReadingTest.passages || [
-    {
-      passageNumber: 1,
-      title: currentReadingTest.passageTitle,
-      subtitle: currentReadingTest.passageSubtitle,
-      text: currentReadingTest.passageText,
-      questions: currentReadingTest.questions
-    }
-  ];
   const activePassage = currentPassages[activeReadingPassageIndex] || currentPassages[0];
-
-  // Active Section in Listening (Section 1: 1–10, Section 2: 11–20, Section 3: 21–30, Section 4: 31–40)
-  const activeListeningSection = currentListeningTest.sections[activeListeningSectionIndex] || currentListeningTest.sections[0];
 
   if (assignedLoadError) {
     return (
@@ -686,19 +700,19 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
             <div className="w-full lg:w-1/2 h-full min-h-0 p-6 overflow-y-auto border-r border-slate-300 bg-white cd-ielts-font leading-relaxed">
               <div className="max-w-2xl mx-auto space-y-4 pb-12">
                 
-                {/* Passage Switcher Tabs (Passage 1, Passage 2, Passage 3) */}
+                {/* Passage Switcher Tabs (Dynamic ranges for GT 1–14 / 15–27 / 28–40 and Academic 1–13 / 14–26 / 27–40) */}
                 <div className="flex items-center gap-2 border-b border-slate-200 pb-3 sticky top-0 bg-white z-10">
                   {currentPassages.map((p, idx) => {
                     const isSelected = activeReadingPassageIndex === idx;
-                    const qRange = idx === 0 ? '1–13' : idx === 1 ? '14–26' : '27–40';
+                    const range = getPassageQuestionRange(p, idx, currentPassages);
+                    const qRange = `${range.start}–${range.end}`;
                     return (
                       <button
                         key={idx}
                         type="button"
                         onClick={() => {
                           setActiveReadingPassageIndex(idx);
-                          const targetQ = idx === 0 ? 1 : idx === 1 ? 14 : 27;
-                          scrollToQuestion(targetQ, 'reading');
+                          scrollToQuestion(range.start, 'reading');
                         }}
                         className={`px-3 py-1.5 rounded-lg font-bold text-xs transition cursor-pointer flex items-center gap-1.5 ${
                           isSelected 
@@ -739,7 +753,7 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                 
                 <div className="bg-amber-50 p-3 rounded-xl border border-amber-200 text-xs text-amber-900 flex items-center justify-between sticky top-0 bg-amber-50/95 backdrop-blur z-10 shadow-sm">
                   <span className="font-semibold">
-                    Questions 1–40: Passage {activeReadingPassageIndex + 1} selected (Active Question: {activeQuestionNumber})
+                    Questions 1–{questionsList.length}: {isGeneralTraining ? 'Section' : 'Passage'} {activeReadingPassageIndex + 1} selected (Active Question: {activeQuestionNumber})
                   </span>
                   <button
                     type="button"
@@ -917,37 +931,62 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                 </p>
               </div>
 
-              {/* Simulated Audio Player */}
+              {/* Listening Audio Player */}
               <div className="bg-slate-900 text-white p-5 rounded-2xl border border-slate-800 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <button
                       type="button"
-                      onClick={() => setAudioPlaying(!audioPlaying)}
-                      className="w-10 h-10 rounded-full bg-amber-500 hover:bg-amber-400 text-slate-950 flex items-center justify-center transition shadow cursor-pointer"
+                      onClick={listeningPlayer.togglePlayPause}
+                      disabled={listeningPlayer.isLockedCompleted}
+                      aria-label={
+                        listeningPlayer.isLockedCompleted
+                          ? 'Section audio already played once'
+                          : listeningPlayer.isPlaying
+                            ? 'Pause listening audio'
+                            : 'Play listening audio'
+                      }
+                      className={`w-10 h-10 rounded-full flex items-center justify-center transition shadow ${
+                        listeningPlayer.isLockedCompleted
+                          ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
+                          : 'bg-amber-500 hover:bg-amber-400 text-slate-950 cursor-pointer'
+                      }`}
                     >
-                      {audioPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
+                      {listeningPlayer.isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
                     </button>
                     <div>
                       <div className="text-xs font-bold">Track 0{activeListeningSectionIndex + 1}: {activeListeningSection.title}</div>
-                      <div className="text-[10px] text-slate-400">Duration: 04:00 • Clear British / Australian Accent • Single Play</div>
+                      <div className="text-[10px] text-slate-400">
+                        Duration: {formatAudioTime(listeningPlayer.elapsedSeconds)} / {formatAudioTime(listeningPlayer.totalDurationSeconds)} • Clear British / Australian Accent • Single Play
+                        {listeningPlayer.isLockedCompleted ? (
+                          <span className="ml-2 text-emerald-400 font-semibold">• Played Once (Completed)</span>
+                        ) : listeningPlayer.recoveryNotice ? (
+                          <span className="ml-2 text-amber-400 font-semibold">• {listeningPlayer.recoveryNotice}</span>
+                        ) : null}
+                      </div>
                     </div>
                   </div>
                   <Volume2 className="w-5 h-5 text-slate-400" />
                 </div>
 
                 <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-                  <div className={`h-full bg-amber-400 transition-all duration-300 ${audioPlaying ? 'w-2/3' : 'w-1/4'}`}></div>
+                  <div
+                    className="h-full bg-amber-400 transition-all duration-300"
+                    style={{ width: `${listeningPlayer.progressPercent}%` }}
+                  ></div>
                 </div>
               </div>
 
-              {/* Transcript Scenario Box */}
+              {/* Listening Instructions & Context Box (Transcript hidden during active exam) */}
               <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 text-xs text-slate-700 space-y-2">
                 <span className="font-bold text-slate-900 uppercase tracking-wider text-[10px]">
-                  Audio Transcript Scenario
+                  Exam Listening Instructions & Context
                 </span>
-                <p className="text-slate-600 leading-relaxed italic whitespace-pre-line text-[11px]">
-                  {activeListeningSection.transcript}
+                <p className="text-slate-600 leading-relaxed text-[11px]">
+                  {activeListeningSection.audioScenario}
+                </p>
+                <p className="text-slate-500 text-[11px] border-t border-slate-200 pt-2">
+                  You will hear this recording once only. Answers appear in order as you listen, and the full audio transcript remains hidden during the active exam.
                 </p>
               </div>
             </div>
