@@ -37,6 +37,7 @@ export interface ListeningAudioPlayerState {
   totalDurationSeconds: number;
   recoveryNotice: string | null;
   togglePlayPause: () => void;
+  startSectionPlayback: () => void;
   restartTrack: () => void;
 }
 
@@ -86,6 +87,8 @@ export function useListeningAudioPlayer({
   // Loaded browser speech synthesis voices (updated via voiceschanged on Windows Chrome/Edge)
   const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
   const voiceFallbackOffsetRef = useRef<number>(0);
+  // Retain strong JS reference to active SpeechSynthesisUtterance so V8 GC never collects it mid-speech
+  const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
   const shouldBePlayingRef = useRef<boolean>(false);
   const statusRef = useRef<AudioPlaybackStatus>('idle');
@@ -109,6 +112,7 @@ export function useListeningAudioPlayer({
   const watchdogIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const recoveryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nextChunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushSpeakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSeekCleanupRef = useRef<(() => void) | null>(null);
 
   const updateStatus = useCallback((next: AudioPlaybackStatus) => {
@@ -156,10 +160,15 @@ export function useListeningAudioPlayer({
       clearTimeout(nextChunkTimerRef.current);
       nextChunkTimerRef.current = null;
     }
+    if (flushSpeakTimerRef.current) {
+      clearTimeout(flushSpeakTimerRef.current);
+      flushSpeakTimerRef.current = null;
+    }
   }, []);
 
   const cancelSpeechEngine = useCallback(() => {
     speechStartedRef.current = false;
+    activeUtteranceRef.current = null;
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
@@ -205,6 +214,7 @@ export function useListeningAudioPlayer({
 
   const markSectionCompleted = useCallback(() => {
     shouldBePlayingRef.current = false;
+    activeUtteranceRef.current = null;
     clearPlaybackTimers();
     updateProgress(100);
     updateElapsed(totalDurationRef.current);
@@ -253,7 +263,7 @@ export function useListeningAudioPlayer({
     };
   }, []);
 
-  const speakChunk = useCallback((chunkIdx: number) => {
+  const speakChunk = useCallback((chunkIdx: number, flushBeforeSpeak: boolean = false) => {
     if (!shouldBePlayingRef.current) return;
 
     const chunks = chunksRef.current;
@@ -261,7 +271,7 @@ export function useListeningAudioPlayer({
       shouldBePlayingRef.current = false;
       clearPlaybackTimers();
       updateStatus('error');
-      setRecoveryNotice('Audio script unavailable for this section.');
+      setRecoveryNotice('Audio script unavailable — click Resume Audio to retry');
       return;
     }
 
@@ -277,110 +287,134 @@ export function useListeningAudioPlayer({
       shouldBePlayingRef.current = false;
       clearPlaybackTimers();
       updateStatus('error');
-      setRecoveryNotice('Browser audio synthesis is unavailable in this environment.');
+      setRecoveryNotice('Audio paused — browser voice synthesis is unavailable');
       return;
     }
 
     const token = ++utteranceTokenRef.current;
     const synth = window.speechSynthesis;
 
-    try {
-      if (synth.speaking || synth.pending || synth.paused) {
-        synth.cancel();
-      }
-    } catch {
-      // Ignore cancel error before speaking
-    }
-
-    // Refresh voice list right before speaking in case voiceschanged fired slightly earlier
-    try {
-      const latestVoices = synth.getVoices();
-      if (latestVoices.length > 0) {
-        voicesRef.current = latestVoices;
-      }
-    } catch {
-      // Ignore
-    }
-
-    const utterance = new SpeechSynthesisUtterance(chunk.text);
-    utterance.rate = SPEECH_RATE;
-    utterance.pitch = chunk.pitch;
-    utterance.volume = 1.0;
-
-    const { primary, secondary } = pickPreferredVoices(
-      voicesRef.current,
-      voiceFallbackOffsetRef.current
-    );
-    const selectedVoice = chunk.pitch !== 1.0 && secondary ? secondary : primary;
-    if (selectedVoice) {
-      utterance.voice = selectedVoice;
-      utterance.lang = selectedVoice.lang || 'en-GB';
-    } else {
-      utterance.lang = 'en-GB';
-    }
-
-    transitionPendingRef.current = false;
-    speechStartedRef.current = false;
-    chunkStartedAtRef.current = Date.now();
-    updateStatus('playing');
-    setRecoveryNotice(null);
-
-    utterance.onstart = () => {
+    const dispatchUtterance = () => {
       if (token !== utteranceTokenRef.current || !shouldBePlayingRef.current) return;
-      speechStartedRef.current = true;
+
+      // Refresh voice list right before speaking in case voiceschanged fired slightly earlier
+      try {
+        const latestVoices = synth.getVoices();
+        if (latestVoices.length > 0) {
+          voicesRef.current = latestVoices;
+        }
+      } catch {
+        // Ignore
+      }
+
+      const utterance = new SpeechSynthesisUtterance(chunk.text);
+      utterance.rate = SPEECH_RATE;
+      utterance.pitch = chunk.pitch;
+      utterance.volume = 1.0;
+
+      const { primary, secondary } = pickPreferredVoices(
+        voicesRef.current,
+        voiceFallbackOffsetRef.current
+      );
+      const selectedVoice = chunk.pitch !== 1.0 && secondary ? secondary : primary;
+      if (selectedVoice) {
+        utterance.voice = selectedVoice;
+        utterance.lang = selectedVoice.lang || 'en-GB';
+      } else {
+        utterance.lang = 'en-GB';
+      }
+
+      // Hold strong reference so V8 GC cannot drop onend/onerror listeners on Chromium
+      activeUtteranceRef.current = utterance;
+
+      transitionPendingRef.current = false;
+      speechStartedRef.current = false;
       chunkStartedAtRef.current = Date.now();
-      chunkRetriesRef.current = 0;
       updateStatus('playing');
       setRecoveryNotice(null);
+
+      utterance.onstart = () => {
+        if (token !== utteranceTokenRef.current || !shouldBePlayingRef.current) return;
+        speechStartedRef.current = true;
+        chunkStartedAtRef.current = Date.now();
+        chunkRetriesRef.current = 0;
+        updateStatus('playing');
+        setRecoveryNotice(null);
+      };
+
+      utterance.onend = () => {
+        if (token !== utteranceTokenRef.current) return;
+        activeUtteranceRef.current = null;
+        if (!shouldBePlayingRef.current) return;
+
+        speechStartedRef.current = false;
+        chunkRetriesRef.current = 0;
+        const nextIdx = chunkIdx + 1;
+
+        if (chunks[chunkIdx]) {
+          const totalWeight = chunks.reduce((s, c) => s + c.weight, 0);
+          if (totalWeight > 0) {
+            const completedWeight = chunks[chunkIdx].cumulativeStartWeight + chunks[chunkIdx].weight;
+            const exactPct = Math.min(99.5, (completedWeight / totalWeight) * 100);
+            const mergedPct = Math.max(progressPercentRef.current, exactPct);
+            updateProgress(mergedPct);
+            updateElapsed(Math.round((mergedPct / 100) * totalDurationRef.current));
+          }
+        }
+
+        if (nextIdx >= chunksRef.current.length) {
+          markSectionCompleted();
+          return;
+        }
+
+        currentChunkIndexRef.current = nextIdx;
+        saveSnapshot(sectionKeyRef.current, false);
+        transitionPendingRef.current = true;
+        nextChunkTimerRef.current = setTimeout(() => {
+          if (token !== utteranceTokenRef.current || !shouldBePlayingRef.current) return;
+          // Sequential transition: NEVER call synth.cancel() here to avoid Chromium queue collisions
+          speakChunk(nextIdx, false);
+        }, 85);
+      };
+
+      utterance.onerror = () => {
+        if (token !== utteranceTokenRef.current) return;
+        activeUtteranceRef.current = null;
+        if (!shouldBePlayingRef.current) return;
+        triggerSpeechRecovery();
+      };
+
+      try {
+        synth.speak(utterance);
+        if (synth.paused) {
+          synth.resume();
+        }
+      } catch {
+        activeUtteranceRef.current = null;
+        triggerSpeechRecovery();
+      }
     };
 
-    utterance.onend = () => {
-      if (token !== utteranceTokenRef.current) return;
-      if (!shouldBePlayingRef.current) return;
-
-      speechStartedRef.current = false;
-      chunkRetriesRef.current = 0;
-      const nextIdx = chunkIdx + 1;
-
-      if (chunks[chunkIdx]) {
-        const totalWeight = chunks.reduce((s, c) => s + c.weight, 0);
-        if (totalWeight > 0) {
-          const completedWeight = chunks[chunkIdx].cumulativeStartWeight + chunks[chunkIdx].weight;
-          const exactPct = Math.min(99.5, (completedWeight / totalWeight) * 100);
-          const mergedPct = Math.max(progressPercentRef.current, exactPct);
-          updateProgress(mergedPct);
-          updateElapsed(Math.round((mergedPct / 100) * totalDurationRef.current));
+    // Only flush speech queue when explicitly starting/recovering — with a 60ms settle delay
+    // so synth.cancel() does not abort the newly enqueued utterance on Chrome/Edge.
+    if (flushBeforeSpeak) {
+      let didCancel = false;
+      try {
+        if (synth.speaking || synth.pending || synth.paused) {
+          synth.cancel();
+          didCancel = true;
         }
+      } catch {
+        // Ignore cancel errors
       }
-
-      if (nextIdx >= chunksRef.current.length) {
-        markSectionCompleted();
+      if (didCancel) {
+        transitionPendingRef.current = true;
+        flushSpeakTimerRef.current = setTimeout(dispatchUtterance, 60);
         return;
       }
-
-      currentChunkIndexRef.current = nextIdx;
-      saveSnapshot(sectionKeyRef.current, false);
-      transitionPendingRef.current = true;
-      nextChunkTimerRef.current = setTimeout(() => {
-        if (token !== utteranceTokenRef.current || !shouldBePlayingRef.current) return;
-        speakChunk(nextIdx);
-      }, 95);
-    };
-
-    utterance.onerror = () => {
-      if (token !== utteranceTokenRef.current) return;
-      if (!shouldBePlayingRef.current) return;
-      triggerSpeechRecovery();
-    };
-
-    try {
-      synth.speak(utterance);
-      if (synth.paused) {
-        synth.resume();
-      }
-    } catch {
-      triggerSpeechRecovery();
     }
+
+    dispatchUtterance();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clearPlaybackTimers, markSectionCompleted, saveSnapshot, updateElapsed, updateProgress, updateStatus]);
 
@@ -389,6 +423,7 @@ export function useListeningAudioPlayer({
     if (recoveryTimerRef.current) return;
 
     utteranceTokenRef.current += 1;
+    activeUtteranceRef.current = null;
     speechStartedRef.current = false;
     transitionPendingRef.current = true;
 
@@ -410,24 +445,23 @@ export function useListeningAudioPlayer({
       clearPlaybackTimers();
       saveSnapshot(sectionKeyRef.current, false);
       updateStatus('error');
-      setRecoveryNotice('Audio paused by browser — click Play to resume from current line');
+      setRecoveryNotice('Audio paused — click Resume Audio to continue from current sentence');
       return;
     }
 
-    // After first failure, cycle to another available English voice (helpful on Windows Chrome/Edge)
     const voicePool = buildOrderedEnglishVoicePool(voicesRef.current);
     if (voicePool.length > 1) {
       voiceFallbackOffsetRef.current += 1;
     }
 
     updateStatus('recovering');
-    setRecoveryNotice(`Audio interrupted — recovering current line (${attempt}/3)...`);
+    setRecoveryNotice(`Audio interrupted — recovering current sentence (${attempt}/3)...`);
 
-    const delayMs = 240 * attempt;
+    const delayMs = 260 * attempt;
     recoveryTimerRef.current = setTimeout(() => {
       recoveryTimerRef.current = null;
       if (!shouldBePlayingRef.current) return;
-      speakChunk(currentChunkIndexRef.current);
+      speakChunk(currentChunkIndexRef.current, true);
     }, delayMs);
   }, [clearPlaybackTimers, saveSnapshot, speakChunk, updateStatus]);
 
@@ -458,7 +492,7 @@ export function useListeningAudioPlayer({
       updateElapsed(Math.round(ratio * defaultTrackDuration));
       updateProgress(Math.max(progressPercentRef.current, ratio * 100));
       setRecoveryNotice('Switching to backup voice stream...');
-      speakChunk(targetIdx);
+      speakChunk(targetIdx, true);
       return;
     }
 
@@ -586,8 +620,12 @@ export function useListeningAudioPlayer({
         }
       }
 
-      // Detect silent engine drop when utterance never started OR stopped without firing onend
-      if (chunkElapsedMs > 2200 && !synth.speaking && !synth.pending) {
+      // Allow up to 4500ms for slower Windows/macOS neural voices to fire onstart,
+      // or 1400ms grace if an utterance started and died without firing onend.
+      const startupStalled = !speechStartedRef.current && chunkElapsedMs > 4500 && !synth.speaking && !synth.pending;
+      const midChunkDropped = speechStartedRef.current && chunkElapsedMs > 1400 && !synth.speaking && !synth.pending;
+
+      if (startupStalled || midChunkDropped) {
         triggerSpeechRecovery();
         return;
       }
@@ -621,6 +659,7 @@ export function useListeningAudioPlayer({
   }, [saveSnapshot, triggerAudioElementRecovery, triggerSpeechRecovery, updateElapsed, updateProgress, updateStatus]);
 
   const startPlaybackFromCurrentPosition = useCallback(() => {
+    if (!isActive) return;
     if (singlePlay && lockedCompletedRef.current) {
       return;
     }
@@ -706,8 +745,8 @@ export function useListeningAudioPlayer({
     }
 
     usingAudioElementRef.current = false;
-    speakChunk(currentChunkIndexRef.current);
-  }, [audioUrl, markSectionCompleted, singlePlay, speakChunk, startWatchdog, triggerAudioElementRecovery, updateElapsed, updateProgress, updateStatus]);
+    speakChunk(currentChunkIndexRef.current, true);
+  }, [audioUrl, isActive, markSectionCompleted, singlePlay, speakChunk, startWatchdog, triggerAudioElementRecovery, updateElapsed, updateProgress, updateStatus]);
 
   const pausePlayback = useCallback(() => {
     shouldBePlayingRef.current = false;
@@ -739,6 +778,16 @@ export function useListeningAudioPlayer({
       startPlaybackFromCurrentPosition();
     }
   }, [isActive, pausePlayback, singlePlay, startPlaybackFromCurrentPosition]);
+
+  const startSectionPlayback = useCallback(() => {
+    if (!isActive) return;
+    if (singlePlay && (lockedCompletedRef.current || statusRef.current === 'completed')) {
+      return;
+    }
+    if (!shouldBePlayingRef.current && statusRef.current !== 'playing') {
+      startPlaybackFromCurrentPosition();
+    }
+  }, [isActive, singlePlay, startPlaybackFromCurrentPosition]);
 
   const restartTrack = useCallback(() => {
     if (singlePlay && (lockedCompletedRef.current || currentChunkIndexRef.current > 0 || progressPercentRef.current > 0)) {
@@ -816,17 +865,8 @@ export function useListeningAudioPlayer({
       setRecoveryNotice(null);
       updateStatus('idle');
     }
-  }, [
-    sectionKey,
-    isActive,
-    isLockedCompleted,
-    defaultTrackDuration,
-    saveSnapshot,
-    stopAllAudioHardware,
-    updateElapsed,
-    updateProgress,
-    updateStatus
-  ]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sectionKey, isActive]);
 
   // Resume automatically when returning to browser tab during active playback
   useEffect(() => {
@@ -870,6 +910,7 @@ export function useListeningAudioPlayer({
     totalDurationSeconds,
     recoveryNotice,
     togglePlayPause,
+    startSectionPlayback,
     restartTrack
   };
 }

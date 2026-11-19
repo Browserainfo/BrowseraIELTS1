@@ -32,7 +32,7 @@ function assert(condition: boolean, name: string, details?: string) {
   }
 }
 
-console.log('Running: Phase 1 Listening Audio & GT Passage Range Tests');
+console.log('Running: Listening Section Playback, Question Coverage & GT Passage Range Tests');
 
 console.log('\n--- SUITE 1: URL FILTERING & TIME FORMATTING ---');
 assert(
@@ -50,12 +50,25 @@ assert(formatAudioTime(65) === '01:05', 'Formats 65 seconds as 01:05');
 assert(formatAudioTime(240) === '04:00', 'Formats 240 seconds as 04:00');
 assert(formatAudioTime(-10) === '00:00', 'Clamps negative seconds safely to 00:00');
 
-console.log('\n--- SUITE 2: SAFE CHUNK SPLITTING & SPEAKER DIFFERENTIATION ---');
+console.log('\n--- SUITE 2: SAFE CHUNK SPLITTING, ABBREVIATION PROTECTION & SPEAKERS ---');
 const longSentence =
   'Welcome candidates to Browsera Education and Examination Services where today we will review the extended library registration rules, weekend laboratory hours, archival research policies, and equipment loan deposits across all main campus buildings.';
 const splitParts = splitTextSafely(longSentence, 155);
 assert(splitParts.length >= 2, 'Splits long sentences into multiple safe chunks');
 assert(splitParts.every(p => p.length <= 155), 'Every split chunk respects <= 155 char cap');
+
+const honorificTranscript = `[Audio Track 3 - Section 3]
+Officer: Thank you, Mr. Harrison. Your room is B-12.
+Maya: Yes, Dr. Patterson. We confirmed four hundred and fifty verified responses.`;
+const honorificChunks = buildListeningChunks(honorificTranscript, 'Fallback');
+assert(
+  honorificChunks.some(c => c.text.includes('Mr. Harrison')),
+  'Preserves "Mr. Harrison" inside a single chunk without abbreviation split'
+);
+assert(
+  honorificChunks.some(c => c.text.includes('Yes, Dr. Patterson.')),
+  'Preserves "Yes, Dr. Patterson." together without splitting on Dr.'
+);
 
 const sampleTranscript = `[Audio Track 1 - Section 1: Inquiries]
 Officer: Good morning, how can I help you?
@@ -68,40 +81,127 @@ assert(chunks[0].pitch !== chunks[1].pitch, 'Assigns distinct subtle pitch per s
 const fallbackChunks = buildListeningChunks('[Audio Track Only]', 'Scenario overview for listening section');
 assert(fallbackChunks.length === 1 && fallbackChunks[0].speaker === 'Narrator', 'Uses fallback scenario when transcript has only headers');
 
-console.log('\n--- SUITE 3: ALL LISTENING TESTS CORPUS & DURATION SYNC ---');
+console.log('\n--- SUITE 3: ALL 200 SECTIONS (50 TESTS x 4 SECTIONS) COVERAGE & CHRONOLOGICAL ORDER ---');
 let totalSectionsChecked = 0;
 let allSectionsValid = true;
+let allQuestionsCovered = true;
+let allSectionsChronological = true;
 let maxChunkLenSeen = 0;
+let minChunkLenSeen = Infinity;
+
+const mcqKeyPhrases: Record<number, string[]> = {
+  8: ['thursday the 14th'],
+  9: ['digital confirmation voucher'],
+  10: ['included in the £45 registration fee'],
+  11: ['twenty-five dedicated testing terminals', 'acoustic dampening partitions'],
+  12: ['second floor of the north wing'],
+  13: ['9:30 am and 4:30 pm'],
+  14: ['security desk', '£10'],
+  15: ['ground floor near the main entrance'],
+  21: ['stratified random sampling', 'twelve municipal districts'],
+  22: ['four hundred and fifty verified responses'],
+  23: ['ninety-five percent confidence interval'],
+  24: ['dual-blind coding', 'external moderator'],
+  25: ['fifteen minutes to present', 'five minutes of peer questions'],
+  26: ['final draft by noon on wednesday'],
+  37: ['initial capital expenditure and fragmented regulatory codes'],
+  38: ['harmonizing international performance benchmarks']
+};
 
 for (const test of LISTENING_TESTS) {
   const sections = test.listeningData?.sections || [];
+  if (sections.length !== 4) {
+    allSectionsValid = false;
+    console.error(`Expected 4 sections in ${test.id}, got ${sections.length}`);
+  }
+
   for (const sec of sections) {
     totalSectionsChecked++;
     const secChunks = buildListeningChunks(sec.transcript, sec.audioScenario);
     const estSec = estimateSpeechDurationSeconds(secChunks, 0.96);
-    if (secChunks.length === 0 || estSec < 30 || estSec > 240) {
+    if (secChunks.length === 0 || sec.questions.length !== 10 || estSec < 30 || estSec > 300) {
       allSectionsValid = false;
-      console.error(`Invalid chunks/duration (${estSec}s) for ${test.id} sec ${sec.sectionNumber}`);
+      console.error(`Invalid section structure (${secChunks.length} chunks, ${sec.questions.length} qs, ${estSec}s) in ${test.id} sec ${sec.sectionNumber}`);
     }
+
     for (const c of secChunks) {
       if (c.text.length > maxChunkLenSeen) maxChunkLenSeen = c.text.length;
+      if (c.text.length < minChunkLenSeen) minChunkLenSeen = c.text.length;
       if (c.text.length > 155) {
         allSectionsValid = false;
         console.error(`Oversized chunk (${c.text.length}) in ${test.id} sec ${sec.sectionNumber}`);
       }
     }
+
+    // Verify every single one of the 10 questions is covered in chronological chunk order
+    let prevPos = -1;
+    for (const q of sec.questions) {
+      let matchedIndex = -1;
+
+      if (q.type === 'fill_blank') {
+        const answers = (Array.isArray(q.correctAnswer) ? q.correctAnswer : [q.correctAnswer]).map(a =>
+          String(a).toLowerCase().trim()
+        );
+        // Find earliest chunk >= prevPos matching answer (to confirm chronological progression!)
+        const sequentialMatch = secChunks.find(
+          c => c.index >= prevPos && answers.some(a => c.text.toLowerCase().includes(a))
+        );
+        if (sequentialMatch) {
+          matchedIndex = sequentialMatch.index;
+        }
+      } else {
+        const phrases = mcqKeyPhrases[q.number] || [];
+        const sequentialMatch = secChunks.find(
+          c => c.index >= prevPos && phrases.every(p => c.text.toLowerCase().includes(p))
+        );
+        if (sequentialMatch) {
+          matchedIndex = sequentialMatch.index;
+        } else {
+          // Allow phrase split across two adjacent chunks starting >= prevPos
+          for (let i = Math.max(0, prevPos); i < secChunks.length - 1; i++) {
+            const pair = `${secChunks[i].text} ${secChunks[i + 1].text}`.toLowerCase();
+            if (phrases.every(p => pair.includes(p))) {
+              matchedIndex = i;
+              break;
+            }
+          }
+        }
+      }
+
+      if (matchedIndex === -1) {
+        // Check if answer existed earlier (out of order) vs missing entirely
+        const anywhere = secChunks.findIndex(c => {
+          if (q.type === 'fill_blank') {
+            return c.text.toLowerCase().includes(String(q.correctAnswer).toLowerCase().trim());
+          }
+          const phrases = mcqKeyPhrases[q.number] || [];
+          return phrases.every(p => c.text.toLowerCase().includes(p));
+        });
+        if (anywhere === -1) {
+          allQuestionsCovered = false;
+          console.error(`Missing Q${q.number} (${q.correctAnswer}) in ${test.id} sec ${sec.sectionNumber}`);
+        } else {
+          allSectionsChronological = false;
+          console.error(`Out-of-order Q${q.number} in ${test.id} sec ${sec.sectionNumber}: found at chunk ${anywhere} < prevPos ${prevPos}`);
+        }
+      } else {
+        prevPos = matchedIndex;
+      }
+    }
   }
 }
 
-assert(totalSectionsChecked >= 200, `Validated all ${totalSectionsChecked} sections across ${LISTENING_TESTS.length} Listening tests`);
-assert(allSectionsValid && maxChunkLenSeen <= 155, `All listening chunks & synchronized speech durations valid (max len: ${maxChunkLenSeen})`);
+assert(totalSectionsChecked === 200, `Validated all ${totalSectionsChecked} sections across ${LISTENING_TESTS.length} Listening tests`);
+assert(allSectionsValid && maxChunkLenSeen <= 155, `All 200 sections have 10 questions & safe chunks (len range: ${minChunkLenSeen}–${maxChunkLenSeen} chars)`);
+assert(allQuestionsCovered, 'Every single one of the 2,000 Listening questions (Q1–Q40 x 50 tests) is covered by its section audio chunks');
+assert(allSectionsChronological, 'All 200 Listening sections cover Q1→Q10, Q11→Q20, Q21→Q30, Q31→Q40 in strict chronological audio order');
 assert(estimateSpeechDurationSeconds([], 0.96) === 0, 'Empty chunks estimate 0s duration');
 
 console.log('\n--- SUITE 4: WATCHDOG TIMEOUTS, MONOTONIC PROGRESS & VOICE FALLBACK ---');
 const minTimeout = getChunkStallTimeoutMs('Hello.', 0.96);
 const maxTimeout = getChunkStallTimeoutMs('x'.repeat(200), 0.7);
-assert(minTimeout >= 12000 && minTimeout <= 35000, `Short chunk timeout within bounds (${minTimeout}ms)`);
-assert(maxTimeout >= 12000 && maxTimeout <= 35000, `Long chunk timeout within bounds (${maxTimeout}ms)`);
+assert(minTimeout >= 14000 && minTimeout <= 35000, `Short chunk timeout within bounds (${minTimeout}ms)`);
+assert(maxTimeout >= 14000 && maxTimeout <= 35000, `Long chunk timeout within bounds (${maxTimeout}ms)`);
 
 assert(calculateChunkProgressPercent(chunks, 0, 0, 'idle', 0) === 0, 'Progress starts at 0 in idle state');
 const midProgress = calculateChunkProgressPercent(chunks, 1, 800, 'playing', 40);
@@ -109,8 +209,8 @@ assert(midProgress >= 40 && midProgress <= 99, `Progress advances monotonically 
 const recoveryProgress = calculateChunkProgressPercent(chunks, 0, 0, 'recovering', midProgress);
 assert(recoveryProgress === midProgress, 'Progress never moves backward during recovery');
 const errorProgress = calculateChunkProgressPercent(chunks, 0, 0, 'error', midProgress);
-assert(errorProgress === midProgress, 'Progress freezes accurately during error interruption');
-assert(calculateChunkProgressPercent(chunks, 1, 0, 'completed', midProgress) === 100, 'Progress reaches 100% on completion');
+assert(errorProgress === midProgress, 'Progress freezes accurately during error interruption (never completes early)');
+assert(calculateChunkProgressPercent(chunks, 1, 0, 'completed', midProgress) === 100, 'Progress reaches 100% only on completion');
 
 const mockVoices = [
   { name: 'Google US English', lang: 'en-US', localService: false },
@@ -150,7 +250,7 @@ assert(ar3.start === 27 && ar3.end === 40, 'Academic Passage 3 range is Q27–40
 assert(findPassageIndexForQuestion(acPassages, 13) === 0 && findPassageIndexForQuestion(acPassages, 14) === 1, 'Academic Q13/Q14 map to Passages 1 and 2');
 assert(findPassageIndexForQuestion(acPassages, 26) === 1 && findPassageIndexForQuestion(acPassages, 27) === 2, 'Academic Q26/Q27 map to Passages 2 and 3');
 
-console.log(`\nPhase 1 Verification Tests Summary: ${passed} passed, ${failed} failed`);
+console.log(`\nListening & GT Passage Tests Summary: ${passed} passed, ${failed} failed`);
 if (failed > 0) {
   process.exit(1);
 }

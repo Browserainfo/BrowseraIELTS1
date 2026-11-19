@@ -78,7 +78,25 @@ export function splitTextSafely(text: string, maxLen: number = 155): string[] {
 }
 
 /**
- * Converts a listening section transcript into speaker-aware short utterances.
+ * Splits a spoken dialogue turn into sentences without falsely splitting after
+ * titles/honorifics (Dr., Mr., Mrs., Ms., Prof.) or abbreviations.
+ */
+function splitIntoSentencesSafe(spokenLine: string): string[] {
+  const DOT_PLACEHOLDER = '__ABBR_DOT__';
+  const protectedLine = spokenLine.replace(
+    /\b(Dr|Mr|Mrs|Ms|Prof|Sr|Jr|St|No|Fig|approx|vs|etc|e\.g|i\.e)\./gi,
+    (_, abbr) => `${abbr}${DOT_PLACEHOLDER}`
+  );
+
+  return protectedLine
+    .split(/(?<=[.!?])\s+/)
+    .map(s => s.split(DOT_PLACEHOLDER).join('.').trim())
+    .filter(Boolean);
+}
+
+/**
+ * Converts a listening section transcript into speaker-aware short utterances,
+ * keeping every word intact while avoiding tiny micro-fragments that cause Chromium TTS drops.
  */
 export function buildListeningChunks(transcript: string, fallbackText?: string): ListeningChunk[] {
   const rawSource = (transcript || fallbackText || '').trim();
@@ -114,16 +132,24 @@ export function buildListeningChunks(transcript: string, fallbackText?: string):
     }
     const pitch = speakerPitches.get(speaker) || 1.0;
 
-    // Split on sentence endings first, then enforce max chunk length <= 155 chars
-    const sentences = spokenLine
-      .split(/(?<=[.!?])\s+/)
-      .map(s => s.trim())
-      .filter(Boolean);
+    // Split on true sentence endings first, then enforce max chunk length <= 155 chars
+    const sentences = splitIntoSentencesSafe(spokenLine);
 
     for (const sentence of sentences) {
       const subParts = splitTextSafely(sentence, 155);
       for (const part of subParts) {
-        rawSegments.push({ speaker, text: part, pitch });
+        const prev = rawSegments[rawSegments.length - 1];
+        // Merge tiny trailing/orphan fragments with previous chunk of same speaker when within 155 chars
+        if (
+          prev &&
+          prev.speaker === speaker &&
+          part.length < 24 &&
+          prev.text.length + 1 + part.length <= 155
+        ) {
+          prev.text = `${prev.text} ${part}`;
+        } else {
+          rawSegments.push({ speaker, text: part, pitch });
+        }
       }
     }
   }
@@ -166,7 +192,7 @@ export function estimateSpeechDurationSeconds(chunks: ListeningChunk[], rate: nu
   const safeRate = Math.max(0.5, Math.min(2.0, rate));
   const totalSec = chunks.reduce((acc, chunk) => {
     const spokenSec = (Math.max(8, chunk.text.length) * 0.072) / safeRate;
-    const pauseGapSec = 0.11;
+    const pauseGapSec = 0.14;
     return acc + spokenSec + pauseGapSec;
   }, 0);
   return Math.max(10, Math.round(totalSec));
@@ -178,9 +204,8 @@ export function estimateSpeechDurationSeconds(chunks: ListeningChunk[], rate: nu
  */
 export function getChunkStallTimeoutMs(chunkText: string, rate: number = 0.96): number {
   const safeRate = Math.max(0.5, Math.min(2.0, rate));
-  // Average speech is ~13-16 chars/sec (~75ms/char). Give generous 2.2x headroom + 6s buffer.
-  const estimatedMs = ((Math.max(15, chunkText.length) * 85) / safeRate) * 2.2 + 6000;
-  return Math.max(12000, Math.min(35000, Math.round(estimatedMs)));
+  const estimatedMs = ((Math.max(15, chunkText.length) * 85) / safeRate) * 2.2 + 6500;
+  return Math.max(14000, Math.min(35000, Math.round(estimatedMs)));
 }
 
 /**
@@ -202,7 +227,6 @@ export function calculateChunkProgressPercent(
   const current = chunks[Math.max(0, currentIndex)];
   if (!current) return previousPercent;
 
-  // Estimate within-chunk completion (~14 chars/sec), capped at 92% until onend arrives
   const estChunkMs = Math.max(1200, current.text.length * 72);
   const intraRatio = Math.min(0.92, Math.max(0, chunkElapsedMs / estChunkMs));
   const coveredWeight = current.cumulativeStartWeight + current.weight * intraRatio;
@@ -227,7 +251,6 @@ export function buildOrderedEnglishVoicePool(voices: SpeechSynthesisVoice[]): Sp
       let s = 0;
       if (lang.includes('gb') || lang.includes('au')) s += 4;
       else if (lang.startsWith('en')) s += 2;
-      // Prefer localService voices slightly for resilience against Windows Chrome remote TTS timeouts
       if (v.localService) s += 1;
       return s;
     };

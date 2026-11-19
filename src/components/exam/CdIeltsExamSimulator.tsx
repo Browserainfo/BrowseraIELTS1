@@ -137,6 +137,7 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
   // Active Passage / Section / Speaking Part Navigation
   const [activeReadingPassageIndex, setActiveReadingPassageIndex] = useState<number>(0);
   const [activeListeningSectionIndex, setActiveListeningSectionIndex] = useState<number>(0);
+  const [playingListeningSectionIndex, setPlayingListeningSectionIndex] = useState<number>(0);
   const [activeSpeakingPart, setActiveSpeakingPart] = useState<1 | 2 | 3>(1);
 
   // Pre-test Audio Device Check State
@@ -158,25 +159,70 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
     }
   ];
 
-  // Active Section in Listening (Section 1: 1–10, Section 2: 11–20, Section 3: 21–30, Section 4: 31–40)
+  // Viewed section (questions pane) vs actively playing audio section (prevents mid-section audio cutoffs)
   const activeListeningSection = currentListeningTest.sections[activeListeningSectionIndex] || currentListeningTest.sections[0];
-  const listeningSectionKey = `${currentListeningTest.id}_sec_${activeListeningSectionIndex}`;
+  const playingListeningSection = currentListeningTest.sections[playingListeningSectionIndex] || currentListeningTest.sections[0];
+  const listeningSectionKey = `${currentListeningTest.id}_sec_${playingListeningSectionIndex}`;
   const [completedListeningSections, setCompletedListeningSections] = useState<Record<string, boolean>>({});
+  const [sectionTransitionNotice, setSectionTransitionNotice] = useState<string | null>(null);
+  const pendingAutoPlaySectionRef = useRef<boolean>(false);
+  const sectionTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clear pending section auto-transition if exiting, submitting, or unmounting
+  useEffect(() => {
+    return () => {
+      if (sectionTransitionTimerRef.current) {
+        clearTimeout(sectionTransitionTimerRef.current);
+        sectionTransitionTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // Reliable Listening audio playback with buffering/stall detection, auto-recovery & single-play lock
   const listeningPlayer = useListeningAudioPlayer({
     sectionKey: listeningSectionKey,
-    transcript: activeListeningSection?.transcript || '',
-    audioScenario: activeListeningSection?.audioScenario,
-    audioDurationSeconds: activeListeningSection?.audioDurationSeconds || 180,
+    transcript: playingListeningSection?.transcript || '',
+    audioScenario: playingListeningSection?.audioScenario,
+    audioDurationSeconds: playingListeningSection?.audioDurationSeconds || 180,
     audioUrl: (currentListeningTest as any).audioSimulatedUrl,
     isActive: !assignedLoadError && !isTestSubmitted && activeModule === 'listening' && pendingAudioCheckModule === null,
     singlePlay: true,
     isLockedCompleted: Boolean(completedListeningSections[listeningSectionKey]),
     onSectionCompleted: (completedKey) => {
       setCompletedListeningSections(prev => (prev[completedKey] ? prev : { ...prev, [completedKey]: true }));
+
+      // Transition sequentially to the next Listening section ONLY after full section audio completes
+      const match = completedKey.match(/_sec_(\d+)$/);
+      const finishedIdx = match ? parseInt(match[1], 10) : playingListeningSectionIndex;
+      const nextIdx = finishedIdx + 1;
+
+      if (nextIdx < currentListeningTest.sections.length) {
+        if (sectionTransitionTimerRef.current) {
+          clearTimeout(sectionTransitionTimerRef.current);
+        }
+        setSectionTransitionNotice(`Section ${finishedIdx + 1} complete — starting Section ${nextIdx + 1}...`);
+        sectionTransitionTimerRef.current = setTimeout(() => {
+          sectionTransitionTimerRef.current = null;
+          setSectionTransitionNotice(null);
+          pendingAutoPlaySectionRef.current = true;
+          setPlayingListeningSectionIndex(nextIdx);
+          setActiveListeningSectionIndex(nextIdx);
+          scrollToQuestion(nextIdx * 10 + 1, 'listening');
+        }, 1200);
+      } else {
+        setSectionTransitionNotice(null);
+      }
     }
   });
+
+  // Trigger sequential playback cleanly once the next section has mounted and reset
+  useEffect(() => {
+    if (pendingAutoPlaySectionRef.current) {
+      pendingAutoPlaySectionRef.current = false;
+      listeningPlayer.startSectionPlayback();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playingListeningSectionIndex]);
 
   // Speaking specific state
   const [speakingPrepTime, setSpeakingPrepTime] = useState(60);
@@ -896,6 +942,7 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
               <div className="flex items-center gap-2 border-b border-slate-200 pb-3 overflow-x-auto sticky top-0 bg-white z-10">
                 {currentListeningTest.sections.map((s, idx) => {
                   const isSelected = activeListeningSectionIndex === idx;
+                  const isAudioActive = playingListeningSectionIndex === idx;
                   const qRange = idx === 0 ? '1–10' : idx === 1 ? '11–20' : idx === 2 ? '21–30' : '31–40';
                   return (
                     <button
@@ -903,6 +950,15 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                       type="button"
                       onClick={() => {
                         setActiveListeningSectionIndex(idx);
+                        // Allow inspecting questions anytime; only switch audio track if playback is NOT currently active
+                        if (!listeningPlayer.isPlaying) {
+                          if (sectionTransitionTimerRef.current) {
+                            clearTimeout(sectionTransitionTimerRef.current);
+                            sectionTransitionTimerRef.current = null;
+                          }
+                          setSectionTransitionNotice(null);
+                          setPlayingListeningSectionIndex(idx);
+                        }
                         const targetQ = idx * 10 + 1;
                         scrollToQuestion(targetQ, 'listening');
                       }}
@@ -913,7 +969,9 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                       }`}
                     >
                       <Headphones className="w-3.5 h-3.5" />
-                      <span>Section {idx + 1} (Q {qRange})</span>
+                      <span>
+                        Section {idx + 1} (Q {qRange}){isAudioActive && listeningPlayer.isPlaying ? ' • Playing' : ''}
+                      </span>
                     </button>
                   );
                 })}
@@ -921,13 +979,13 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
 
               <div className="border-b border-slate-200 pb-2">
                 <span className="text-xs font-bold uppercase tracking-wider text-sky-600">
-                  SECTION {activeListeningSectionIndex + 1} AUDIO STREAM
+                  SECTION {playingListeningSectionIndex + 1} AUDIO STREAM
                 </span>
                 <h1 className="text-xl font-bold text-slate-900 mt-1">
-                  {activeListeningSection.title}
+                  {playingListeningSection.title}
                 </h1>
                 <p className="text-xs text-slate-500 mt-1">
-                  {activeListeningSection.audioScenario}
+                  {playingListeningSection.audioScenario}
                 </p>
               </div>
 
@@ -937,7 +995,14 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                   <div className="flex items-center gap-3">
                     <button
                       type="button"
-                      onClick={listeningPlayer.togglePlayPause}
+                      onClick={() => {
+                        if (sectionTransitionTimerRef.current) {
+                          clearTimeout(sectionTransitionTimerRef.current);
+                          sectionTransitionTimerRef.current = null;
+                        }
+                        setSectionTransitionNotice(null);
+                        listeningPlayer.togglePlayPause();
+                      }}
                       disabled={listeningPlayer.isLockedCompleted}
                       aria-label={
                         listeningPlayer.isLockedCompleted
@@ -955,11 +1020,21 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                       {listeningPlayer.isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
                     </button>
                     <div>
-                      <div className="text-xs font-bold">Track 0{activeListeningSectionIndex + 1}: {activeListeningSection.title}</div>
+                      <div className="text-xs font-bold">Track 0{playingListeningSectionIndex + 1}: {playingListeningSection.title}</div>
                       <div className="text-[10px] text-slate-400">
                         Duration: {formatAudioTime(listeningPlayer.elapsedSeconds)} / {formatAudioTime(listeningPlayer.totalDurationSeconds)} • Clear British / Australian Accent • Single Play
-                        {listeningPlayer.isLockedCompleted ? (
+                        {sectionTransitionNotice ? (
+                          <span className="ml-2 text-sky-400 font-semibold">• {sectionTransitionNotice}</span>
+                        ) : listeningPlayer.isLockedCompleted ? (
                           <span className="ml-2 text-emerald-400 font-semibold">• Played Once (Completed)</span>
+                        ) : listeningPlayer.status === 'error' ? (
+                          <button
+                            type="button"
+                            onClick={listeningPlayer.togglePlayPause}
+                            className="ml-2 text-amber-400 hover:text-amber-300 underline font-semibold cursor-pointer"
+                          >
+                            • Resume Audio
+                          </button>
                         ) : listeningPlayer.recoveryNotice ? (
                           <span className="ml-2 text-amber-400 font-semibold">• {listeningPlayer.recoveryNotice}</span>
                         ) : null}
