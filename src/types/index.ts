@@ -40,7 +40,15 @@ export interface User {
 export interface QuestionItem {
   id: string;
   number: number;
-  type: 'multiple_choice' | 'true_false_not_given' | 'matching_headings' | 'fill_blank' | 'short_answer';
+  type:
+    | 'multiple_choice'
+    | 'true_false_not_given'
+    | 'yes_no_not_given'
+    | 'matching_headings'
+    | 'matching_information'
+    | 'fill_blank'
+    | 'summary_completion'
+    | 'short_answer';
   questionText: string;
   options?: string[];
   correctAnswer: string | string[];
@@ -259,6 +267,7 @@ export interface TestSubmission {
   teacherName?: string;
   teacherAdjustedBand?: number;
   teacherFeedbackNotes?: string;
+  feedbackNotes?: string;
   teacherReviewedAt?: string;
 }
 

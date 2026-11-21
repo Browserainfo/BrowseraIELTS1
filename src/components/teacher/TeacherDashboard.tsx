@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   UserCheck, 
   Users, 
@@ -21,8 +21,9 @@ import {
   Filter,
   Plus
 } from 'lucide-react';
-import { User, TestSubmission, DailyAssignment, ExamModule } from '../../types';
+import { User, TestSubmission, ExamModule } from '../../types';
 import { DataService } from '../../services/dataService';
+import { apiService } from '../../services/apiService';
 
 interface TeacherDashboardProps {
   currentTeacher: User;
@@ -33,67 +34,150 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   currentTeacher,
   onOpenSubmissionModal
 }) => {
-  const [submissions, setSubmissions] = useState<TestSubmission[]>(() => DataService.getSubmissions());
-  const [users] = useState<User[]>(() => DataService.getUsers());
+  const [submissions, setSubmissions] = useState<TestSubmission[]>([]);
+  const [students, setStudents] = useState<any[]>([]);
+  const [availableTests, setAvailableTests] = useState<any[]>([]);
   const [selectedSubForReview, setSelectedSubForReview] = useState<TestSubmission | null>(null);
   const [isAssignModalOpen, setIsAssignModalOpen] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [assignStatus, setAssignStatus] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [isSavingReview, setIsSavingReview] = useState(false);
+  const [isAssigning, setIsAssigning] = useState(false);
 
   // Teacher Review inputs
   const [adjustedBand, setAdjustedBand] = useState<number>(7.0);
   const [teacherNotes, setTeacherNotes] = useState<string>('');
 
   // Quick Assign inputs
-  const [assignTitle, setAssignTitle] = useState('');
   const [assignModule, setAssignModule] = useState<ExamModule>('writing');
-  const [assignBatch, setAssignBatch] = useState(currentTeacher.assignedBatches?.[0] || 'Morning IELTS Master 7.5+');
-  const [assignDueDate, setAssignDueDate] = useState('2026-11-02');
+  const [assignTestId, setAssignTestId] = useState('');
+  const [assignTargetType, setAssignTargetType] = useState<'batch' | 'student'>('batch');
+  const [assignStudentId, setAssignStudentId] = useState('');
+  const [assignBatch, setAssignBatch] = useState(currentTeacher.assignedBatches?.[0] || 'CD-IELTS_Academic_default');
+  const [assignDueDate, setAssignDueDate] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 3);
+    return d.toISOString().split('T')[0];
+  });
 
-  const assignedStudents = users.filter(u => u.role === 'student');
+  const loadTeacherData = async () => {
+    try {
+      const [stData, subData, testData] = await Promise.all([
+        apiService.getStudents(),
+        apiService.getSubmissions(),
+        apiService.getTests()
+      ]);
+      const safeStudents = Array.isArray(stData) && stData.length > 0
+        ? stData
+        : DataService.getUsers().filter(u => u.role === 'student');
+      const safeSubs = Array.isArray(subData) ? subData : DataService.getSubmissions();
+      const safeTests = Array.isArray(testData) ? testData : [];
+
+      setStudents(safeStudents);
+      setSubmissions(safeSubs);
+      setAvailableTests(safeTests);
+
+      if (safeStudents.length > 0 && !assignStudentId) {
+        setAssignStudentId(safeStudents[0].studentId || safeStudents[0].id);
+      }
+      const firstBatch = safeStudents.find((s: any) => s.batch)?.batch;
+      if (firstBatch) {
+        setAssignBatch(prev => prev === 'CD-IELTS_Academic_default' ? firstBatch : prev);
+      }
+    } catch (err) {
+      console.warn('Notice loading teacher dashboard data:', err);
+      setStudents(DataService.getUsers().filter(u => u.role === 'student'));
+      setSubmissions(DataService.getSubmissions());
+    }
+  };
+
+  useEffect(() => {
+    loadTeacherData();
+  }, []);
+
+  const filteredModalTests = availableTests.filter(
+    t => (t.module || '').toLowerCase() === assignModule.toLowerCase()
+  );
+
+  useEffect(() => {
+    if (filteredModalTests.length > 0 && !filteredModalTests.some(t => t.id === assignTestId)) {
+      setAssignTestId(filteredModalTests[0].id);
+    }
+  }, [assignModule, availableTests]);
+
+  const batchOptions = Array.from(
+    new Set([
+      ...students.map((s: any) => s.batch || s.batchName).filter(Boolean),
+      'CD-IELTS_Academic_default',
+      'CD-IELTS_General_Training_default',
+      ...(currentTeacher.assignedBatches || [])
+    ])
+  );
+
+  const assignedStudents = students;
   const pendingSubmissions = submissions.filter(s => !s.teacherReviewed);
+  const scoredSubs = submissions
+    .map(s => s.teacherAdjustedBand ?? s.overallBand ?? s.rawBandScore ?? s.aiReport?.overallBand)
+    .filter((v): v is number => typeof v === 'number' && v > 0 && v <= 9);
+  const averageBandDisplay = scoredSubs.length > 0
+    ? `${(scoredSubs.reduce((a, b) => a + b, 0) / scoredSubs.length).toFixed(1)} Band`
+    : 'No scores yet';
 
   const handleOpenReview = (sub: TestSubmission) => {
+    setReviewError(null);
     setSelectedSubForReview(sub);
-    const initialBand = sub.teacherAdjustedBand ?? sub.rawBandScore ?? sub.aiReport?.overallBand ?? 6.5;
+    const initialBand = sub.teacherAdjustedBand ?? sub.overallBand ?? sub.rawBandScore ?? sub.aiReport?.overallBand ?? 6.5;
     setAdjustedBand(initialBand);
-    setTeacherNotes(sub.teacherFeedbackNotes || 'Commendable effort. Review the grammar upgrades and maintain structured paragraphing.');
+    setTeacherNotes(sub.teacherFeedbackNotes || sub.feedbackNotes || 'Commendable effort. Review the grammar upgrades and maintain structured paragraphing.');
   };
 
-  const handleSaveTeacherReview = () => {
-    if (!selectedSubForReview) return;
+  const handleSaveTeacherReview = async () => {
+    if (!selectedSubForReview || isSavingReview) return;
+    setIsSavingReview(true);
+    setReviewError(null);
 
-    DataService.updateTeacherReview(selectedSubForReview.id, {
-      teacherId: currentTeacher.id,
-      teacherName: currentTeacher.name,
-      adjustedBand: adjustedBand,
-      feedbackNotes: teacherNotes
-    });
-
-    setSubmissions(DataService.getSubmissions());
-    setSelectedSubForReview(null);
+    try {
+      const updated = await apiService.reviewSubmission(selectedSubForReview.id, {
+        adjustedBand,
+        feedbackNotes: teacherNotes
+      });
+      setSubmissions(prev => prev.map(s => (s.id === selectedSubForReview.id ? { ...s, ...updated } : s)));
+      setSelectedSubForReview(null);
+    } catch (err: any) {
+      setReviewError(err?.message || 'Could not save review to server.');
+    } finally {
+      setIsSavingReview(false);
+    }
   };
 
-  const handleCreateAssignment = (e: React.FormEvent) => {
+  const handleCreateAssignment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!assignTitle) return;
+    if (!assignTestId || isAssigning) return;
+    setIsAssigning(true);
+    setAssignStatus(null);
 
-    const newAssignment: DailyAssignment = {
-      id: `assign_${Date.now()}`,
-      title: assignTitle,
-      courseType: 'ielts_academic',
-      module: assignModule,
-      assignedByTeacherId: currentTeacher.id,
-      teacherName: currentTeacher.name,
-      batchName: assignBatch,
-      assignedDate: new Date().toISOString().split('T')[0],
-      dueDate: assignDueDate,
-      durationMinutes: 40,
-      testReferenceId: 'write_task_2',
-      status: 'pending'
-    };
-
-    DataService.saveAssignment(newAssignment);
-    setIsAssignModalOpen(false);
-    setAssignTitle('');
+    try {
+      const selectedTest = availableTests.find(t => t.id === assignTestId);
+      const res = await apiService.assignTest({
+        targetType: assignTargetType,
+        testId: assignTestId,
+        studentId: assignTargetType === 'student' ? assignStudentId : undefined,
+        batchName: assignTargetType === 'batch' ? assignBatch : undefined,
+        courseType: selectedTest?.courseType || 'CD-IELTS',
+        dueDate: assignDueDate,
+        availability: 'Immediate',
+        allowDuplicate: false
+      });
+      setAssignStatus({ type: 'success', text: res.message || 'Test assigned successfully.' });
+      setTimeout(() => {
+        setIsAssignModalOpen(false);
+        setAssignStatus(null);
+      }, 1000);
+    } catch (err: any) {
+      setAssignStatus({ type: 'error', text: err?.message || 'Failed to assign test.' });
+    } finally {
+      setIsAssigning(false);
+    }
   };
 
   return (
@@ -151,16 +235,16 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
           <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
             <div className="text-[11px] font-semibold text-slate-500 uppercase">Average Student Band</div>
-            <div className="text-2xl font-bold text-slate-900 mt-1">7.1 Band</div>
+            <div className="text-2xl font-bold text-slate-900 mt-1">{averageBandDisplay}</div>
             <div className="text-[10px] text-slate-500 font-semibold mt-0.5">Target: 7.5+ Band</div>
           </div>
 
           <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
             <div className="text-[11px] font-semibold text-slate-500 uppercase">Assigned Batches</div>
             <div className="text-xs font-bold text-slate-800 mt-1 line-clamp-1">
-              {currentTeacher.assignedBatches?.[0] || 'Morning Master 7.5+'}
+              {batchOptions[0] || currentTeacher.assignedBatches?.[0] || 'CD-IELTS_Academic_default'}
             </div>
-            <div className="text-[10px] text-slate-500 font-semibold mt-0.5">Daily Attendance: 96%</div>
+            <div className="text-[10px] text-slate-500 font-semibold mt-0.5">Active Training Lab</div>
           </div>
         </div>
 
@@ -190,19 +274,19 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                     />
                     <div>
                       <div className="font-bold text-xs text-slate-900">{student.name}</div>
-                      <div className="text-[11px] text-slate-500 font-mono">{student.candidateNumber || student.email}</div>
-                      <div className="text-[10px] text-amber-700 font-medium">{student.batchName}</div>
+                      <div className="text-[11px] text-slate-500 font-mono">{student.candidateNumber || student.studentId || student.email}</div>
+                      <div className="text-[10px] text-amber-700 font-medium">{student.batchName || student.batch || student.course}</div>
                     </div>
                   </div>
 
                   <div className="text-right space-y-0.5">
                     <div className="text-xs font-bold text-slate-900">
-                      Current: <span className="text-amber-600">{student.currentBand || 6.5} Band</span>
+                      Status: <span className={student.accountStatus === 'Active' ? 'text-emerald-600' : 'text-slate-500'}>{student.accountStatus || 'Active'}</span>
                     </div>
                     <div className="text-[10px] text-slate-500">
                       Target: <span className="font-bold text-slate-700">{student.targetBand || 7.5} Band</span>
                     </div>
-                    <div className="text-[10px] text-slate-400">Exam: {student.targetExamDate || 'Dec 2026'}</div>
+                    <div className="text-[10px] text-slate-400">{student.course || 'CD-IELTS'}</div>
                   </div>
                 </div>
               ))}
@@ -275,13 +359,23 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                       </span>
                     )}
 
-                    <button
-                      onClick={() => handleOpenReview(sub)}
-                      className="bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs px-3 py-1.5 rounded-lg flex items-center gap-1 transition"
-                    >
-                      <span>{sub.teacherReviewed ? 'Inspect / Edit' : 'Review AI Feedback'}</span>
-                      <ChevronRight className="w-3 h-3" />
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {sub.questionAnalysis && sub.questionAnalysis.length > 0 && (
+                        <button
+                          onClick={() => onOpenSubmissionModal(sub)}
+                          className="bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs px-2.5 py-1.5 rounded-lg transition"
+                        >
+                          Answers
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleOpenReview(sub)}
+                        className="bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs px-3 py-1.5 rounded-lg flex items-center gap-1 transition"
+                      >
+                        <span>{sub.teacherReviewed ? 'Inspect / Edit' : 'Review AI Feedback'}</span>
+                        <ChevronRight className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -404,6 +498,12 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               </div>
             </div>
 
+            {reviewError && (
+              <div className="text-xs text-red-700 bg-red-50 border border-red-200 px-3 py-2 rounded-lg">
+                {reviewError}
+              </div>
+            )}
+
             <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
               <button
                 type="button"
@@ -414,10 +514,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               </button>
               <button
                 type="button"
+                disabled={isSavingReview}
                 onClick={handleSaveTeacherReview}
-                className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-lg shadow-sm"
+                className="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-60 text-slate-950 font-bold text-xs rounded-lg shadow-sm"
               >
-                Approve & Publish to Student Report Card
+                {isSavingReview ? 'Saving...' : 'Approve & Publish to Student Report Card'}
               </button>
             </div>
           </div>
@@ -428,31 +529,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       {isAssignModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 border border-slate-200 space-y-4">
-            <h3 className="text-base font-bold text-slate-900">Assign Practice Test to Batch</h3>
+            <h3 className="text-base font-bold text-slate-900">Assign Practice Test</h3>
             
             <form onSubmit={handleCreateAssignment} className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Test Title</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. CD-IELTS Academic Writing Task 2 Mock"
-                  value={assignTitle}
-                  onChange={(e) => setAssignTitle(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg"
-                />
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Target Batch</label>
-                <input
-                  type="text"
-                  value={assignBatch}
-                  onChange={(e) => setAssignBatch(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg"
-                />
-              </div>
-
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Module</label>
@@ -471,6 +550,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   <label className="block font-semibold text-slate-700 mb-1">Due Date</label>
                   <input
                     type="date"
+                    required
                     value={assignDueDate}
                     onChange={(e) => setAssignDueDate(e.target.value)}
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg"
@@ -478,19 +558,92 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                 </div>
               </div>
 
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Select Curated Test</label>
+                <select
+                  required
+                  value={assignTestId}
+                  onChange={(e) => setAssignTestId(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white"
+                >
+                  {filteredModalTests.map((t: any) => (
+                    <option key={t.id} value={t.id}>
+                      {t.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setAssignTargetType('batch')}
+                  className={`py-2 rounded-lg font-bold border ${assignTargetType === 'batch' ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-700 border-slate-300'}`}
+                >
+                  Assign to Batch
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAssignTargetType('student')}
+                  className={`py-2 rounded-lg font-bold border ${assignTargetType === 'student' ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-700 border-slate-300'}`}
+                >
+                  Assign to Student
+                </button>
+              </div>
+
+              {assignTargetType === 'batch' ? (
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Target Batch</label>
+                  <select
+                    value={assignBatch}
+                    onChange={(e) => setAssignBatch(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white"
+                  >
+                    {batchOptions.map((b: string) => (
+                      <option key={b} value={b}>{b}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Target Student</label>
+                  <select
+                    value={assignStudentId}
+                    onChange={(e) => setAssignStudentId(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white"
+                  >
+                    {students.map((st: any) => (
+                      <option key={st.id} value={st.studentId || st.id}>
+                        {st.name} ({st.studentId || st.id}) • {st.course}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {assignStatus && (
+                <div className={`p-2.5 rounded-lg text-xs font-medium ${assignStatus.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+                  {assignStatus.text}
+                </div>
+              )}
+
               <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setIsAssignModalOpen(false)}
+                  onClick={() => {
+                    setIsAssignModalOpen(false);
+                    setAssignStatus(null);
+                  }}
                   className="px-4 py-2 border border-slate-300 rounded-lg text-slate-700 font-semibold"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg"
+                  disabled={isAssigning || !assignTestId}
+                  className="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-60 text-slate-950 font-bold rounded-lg"
                 >
-                  Assign to Students
+                  {isAssigning ? 'Assigning...' : 'Assign to Students'}
                 </button>
               </div>
             </form>

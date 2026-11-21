@@ -10,6 +10,7 @@ export interface ListeningChunk {
   pitch: number;
   weight: number;
   cumulativeStartWeight: number;
+  questionNumber?: number;
 }
 
 export type AudioPlaybackStatus =
@@ -57,15 +58,16 @@ export function splitTextSafely(text: string, maxLen: number = 155): string[] {
     // Prefer sentence punctuation, then clause punctuation, then whitespace
     for (const punct of ['. ', '! ', '? ', '; ', ': ', ', ', '—', ' - ']) {
       const idx = slice.lastIndexOf(punct);
-      if (idx >= Math.floor(maxLen * 0.45)) {
-        splitAt = idx + punct.trimEnd().length;
+      const endOffset = idx + punct.trimEnd().length;
+      if (idx >= Math.floor(maxLen * 0.45) && endOffset <= maxLen) {
+        splitAt = endOffset;
         break;
       }
     }
 
-    if (splitAt <= 0) {
+    if (splitAt <= 0 || splitAt > maxLen) {
       const spaceIdx = slice.lastIndexOf(' ');
-      splitAt = spaceIdx >= Math.floor(maxLen * 0.4) ? spaceIdx : maxLen;
+      splitAt = spaceIdx >= Math.floor(maxLen * 0.4) && spaceIdx <= maxLen ? spaceIdx : maxLen;
     }
 
     const head = remaining.slice(0, splitAt).trim();
@@ -96,7 +98,7 @@ function splitIntoSentencesSafe(spokenLine: string): string[] {
 
 /**
  * Converts a listening section transcript into speaker-aware short utterances,
- * keeping every word intact while avoiding tiny micro-fragments that cause Chromium TTS drops.
+ * stripping [[Q#]] question cue markers from spoken text while retaining cue metadata.
  */
 export function buildListeningChunks(transcript: string, fallbackText?: string): ListeningChunk[] {
   const rawSource = (transcript || fallbackText || '').trim();
@@ -110,7 +112,7 @@ export function buildListeningChunks(transcript: string, fallbackText?: string):
   const speakerPitches = new Map<string, number>();
   const pitchPool = [1.0, 1.07, 0.93, 1.12];
 
-  const rawSegments: { speaker: string; text: string; pitch: number }[] = [];
+  const rawSegments: { speaker: string; text: string; pitch: number; questionNumber?: number }[] = [];
 
   for (const line of lines) {
     // Skip bracketed track metadata headers such as "[Audio Track 1 - Section 1: ...]"
@@ -118,9 +120,19 @@ export function buildListeningChunks(transcript: string, fallbackText?: string):
       continue;
     }
 
-    const speakerMatch = line.match(/^([A-Za-z][A-Za-z0-9.\s'-]{1,30}):\s+(.+)$/);
+    let lineQuestionNumber: number | undefined;
+    const cueMatch = line.match(/\[\[Q(\d+)\]\]/i);
+    if (cueMatch) {
+      lineQuestionNumber = parseInt(cueMatch[1], 10);
+    }
+
+    // Strip any [[Q#]] markers so TTS never speaks cue metadata aloud
+    const cleanedLine = line.replace(/\[\[Q\d+\]\]/gi, '').replace(/\s+/g, ' ').trim();
+    if (!cleanedLine) continue;
+
+    const speakerMatch = cleanedLine.match(/^([A-Za-z][A-Za-z0-9.\s'-]{1,30}):\s+(.+)$/);
     let speaker = 'Narrator';
-    let spokenLine = line;
+    let spokenLine = cleanedLine;
 
     if (speakerMatch) {
       speaker = speakerMatch[1].trim();
@@ -139,16 +151,17 @@ export function buildListeningChunks(transcript: string, fallbackText?: string):
       const subParts = splitTextSafely(sentence, 155);
       for (const part of subParts) {
         const prev = rawSegments[rawSegments.length - 1];
-        // Merge tiny trailing/orphan fragments with previous chunk of same speaker when within 155 chars
+        // Merge tiny trailing/orphan fragments with previous chunk of same speaker & same question cue
         if (
           prev &&
           prev.speaker === speaker &&
+          prev.questionNumber === lineQuestionNumber &&
           part.length < 24 &&
           prev.text.length + 1 + part.length <= 155
         ) {
           prev.text = `${prev.text} ${part}`;
         } else {
-          rawSegments.push({ speaker, text: part, pitch });
+          rawSegments.push({ speaker, text: part, pitch, questionNumber: lineQuestionNumber });
         }
       }
     }
@@ -170,7 +183,8 @@ export function buildListeningChunks(transcript: string, fallbackText?: string):
       text: seg.text,
       pitch: seg.pitch,
       weight,
-      cumulativeStartWeight: cumulative
+      cumulativeStartWeight: cumulative,
+      ...(seg.questionNumber !== undefined ? { questionNumber: seg.questionNumber } : {})
     };
     cumulative += weight;
     return chunk;

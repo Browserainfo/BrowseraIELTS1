@@ -831,29 +831,15 @@ export const DataService = {
 
   getReadingTests: (courseType?: 'ielts_academic' | 'ielts_general'): ReadingTest[] => {
     if (courseType === 'ielts_general') {
-      const gtList = GT_READING_TESTS.map(t => t.readingData!).filter(Boolean);
-      return gtList;
+      return GT_READING_TESTS.map(t => t.readingData!).filter(Boolean);
     }
-    const list = READING_TESTS.map(t => t.readingData!).filter(Boolean);
-    const stored = getStored<ReadingTest[]>('reading_tests', list);
-    if (stored && stored[0] && (stored[0].questions?.length ?? 0) < 40) {
-      setStored('reading_tests', list);
-      return list;
-    }
-    return stored && stored.length > 0 ? stored : list;
+    return READING_TESTS.map(t => t.readingData!).filter(Boolean);
   },
   getGtReadingTests: (): ReadingTest[] => {
     return GT_READING_TESTS.map(t => t.readingData!).filter(Boolean);
   },
   getListeningTests: (): ListeningTest[] => {
-    const list = LISTENING_TESTS.map(t => t.listeningData!).filter(Boolean);
-    const stored = getStored<ListeningTest[]>('listening_tests', list);
-    const totalQ = stored?.[0]?.sections?.reduce((sum, s) => sum + (s.questions?.length || 0), 0) ?? 0;
-    if (stored && stored[0] && (totalQ < 40 || (stored[0].sections?.length ?? 0) < 4)) {
-      setStored('listening_tests', list);
-      return list;
-    }
-    return stored && stored.length > 0 ? stored : list;
+    return LISTENING_TESTS.map(t => t.listeningData!).filter(Boolean);
   },
   getWritingTasks: (courseType?: 'ielts_academic' | 'ielts_general'): WritingTask[] => {
     if (courseType === 'ielts_general') {

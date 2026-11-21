@@ -288,7 +288,7 @@ export const PteExamSimulator: React.FC<PteExamSimulatorProps> = ({
         assignmentId,
         studentId: currentUser.id,
         studentName: currentUser.name,
-        candidateNumber: currentUser.candidateNumber || 'CD-2026-9042',
+        candidateNumber: currentUser.candidateNumber || (currentUser as any).studentId || 'CD-2026-9042',
         testTitle: resolvedTestTitle,
         courseType: resolvedCategory === 'PTE Core' ? 'pte_core' : resolvedCategory === 'PTE Academic UKVI' ? 'pte_academic_ukvi' : 'pte_academic' as any,
         module: isListening ? 'listening' : 'speaking',
@@ -319,7 +319,7 @@ export const PteExamSimulator: React.FC<PteExamSimulatorProps> = ({
         teacherReviewed: false
       };
 
-      const hasAuthToken = typeof window !== 'undefined' && Boolean(localStorage.getItem('browsera_token'));
+      const hasAuthToken = typeof window !== 'undefined' && Boolean(apiService.getToken() || localStorage.getItem('browsera_auth_token') || (currentUser as any)?.role);
       if (hasAuthToken) {
         try {
           const saved = await apiService.submitTest(newSub);

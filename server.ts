@@ -726,6 +726,30 @@ app.post('/api/submissions', requireAuth(['student', 'admin', 'teacher']), (req:
   return res.json({ success: true, message: 'Submission saved successfully', submission });
 });
 
+// PATCH /api/submissions/:id/review (Admin & Teacher only)
+app.patch('/api/submissions/:id/review', requireAuth(['admin', 'teacher']), (req: Request, res: Response) => {
+  const user = (req as any).user as UserRecord;
+  const { adjustedBand, feedbackNotes } = req.body;
+  const parsedBand = Number(adjustedBand);
+
+  if (!Number.isFinite(parsedBand) || parsedBand < 0 || parsedBand > 9) {
+    return res.status(400).json({ success: false, error: 'Adjusted band score must be between 0.0 and 9.0.' });
+  }
+
+  const updated = db.updateSubmissionReview(req.params.id, {
+    teacherId: user.id,
+    teacherName: user.name,
+    adjustedBand: Math.round(parsedBand * 2) / 2,
+    feedbackNotes: typeof feedbackNotes === 'string' ? feedbackNotes.trim() : ''
+  });
+
+  if (!updated) {
+    return res.status(404).json({ success: false, error: 'Submission not found.' });
+  }
+
+  return res.json({ success: true, submission: updated });
+});
+
 // ==========================================
 // AI & LINGUISTIC EXAM EVALUATION ENDPOINTS
 // ==========================================
@@ -1023,10 +1047,31 @@ async function startServer() {
       server: {
         middlewareMode: true,
         hmr: false,
+        ws: false,
         watch: null,
       },
       appType: 'spa'
     });
+
+    // When HMR/WebSocket is disabled in middleware mode, keep Vite CSS/HMR runtime exports
+    // without initiating a failing port-24678 WebSocket connection or console error.
+    app.get('/@vite/client', async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        const result = await vite.transformRequest('/@vite/client');
+        if (!result?.code) return next();
+        const patchedCode = result.code
+          .replace('console.debug("[vite] connecting...");', '')
+          .replace(
+            'transport.connect(createHMRHandler(handleMessage));',
+            '/* HMR WebSocket connection disabled */'
+          );
+        res.setHeader('Cache-Control', 'no-cache');
+        return res.type('application/javascript').send(patchedCode);
+      } catch (err) {
+        return next(err);
+      }
+    });
+
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.resolve('dist')));

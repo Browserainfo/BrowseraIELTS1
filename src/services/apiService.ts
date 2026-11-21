@@ -267,6 +267,23 @@ export const apiService = {
     return data.submission;
   },
 
+  async reviewSubmission(
+    submissionId: string,
+    payload: { adjustedBand: number; feedbackNotes: string }
+  ) {
+    const res = await fetch(`/api/submissions/${submissionId}/review`, {
+      method: 'PATCH',
+      headers: this.getHeaders(),
+      credentials: 'include',
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to save teacher review');
+    }
+    return data.submission;
+  },
+
   async submitEnquiry(payload: {
     formName: string;
     formType: 'assessment' | 'student_portal' | 'general';

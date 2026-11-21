@@ -83,30 +83,13 @@ assert(fallbackChunks.length === 1 && fallbackChunks[0].speaker === 'Narrator', 
 
 console.log('\n--- SUITE 3: ALL 200 SECTIONS (50 TESTS x 4 SECTIONS) COVERAGE & CHRONOLOGICAL ORDER ---');
 let totalSectionsChecked = 0;
+let totalQuestionsChecked = 0;
 let allSectionsValid = true;
 let allQuestionsCovered = true;
 let allSectionsChronological = true;
+let allMcqsValid = true;
 let maxChunkLenSeen = 0;
 let minChunkLenSeen = Infinity;
-
-const mcqKeyPhrases: Record<number, string[]> = {
-  8: ['thursday the 14th'],
-  9: ['digital confirmation voucher'],
-  10: ['included in the £45 registration fee'],
-  11: ['twenty-five dedicated testing terminals', 'acoustic dampening partitions'],
-  12: ['second floor of the north wing'],
-  13: ['9:30 am and 4:30 pm'],
-  14: ['security desk', '£10'],
-  15: ['ground floor near the main entrance'],
-  21: ['stratified random sampling', 'twelve municipal districts'],
-  22: ['four hundred and fifty verified responses'],
-  23: ['ninety-five percent confidence interval'],
-  24: ['dual-blind coding', 'external moderator'],
-  25: ['fifteen minutes to present', 'five minutes of peer questions'],
-  26: ['final draft by noon on wednesday'],
-  37: ['initial capital expenditure and fragmented regulatory codes'],
-  38: ['harmonizing international performance benchmarks']
-};
 
 for (const test of LISTENING_TESTS) {
   const sections = test.listeningData?.sections || [];
@@ -133,67 +116,74 @@ for (const test of LISTENING_TESTS) {
       }
     }
 
-    // Verify every single one of the 10 questions is covered in chronological chunk order
-    let prevPos = -1;
+    // Verify every single one of the 10 questions has chronological [[Q#]] cues and complete audio coverage
+    let prevCuePos = -1;
+    let prevAnswerPos = -1;
     for (const q of sec.questions) {
-      let matchedIndex = -1;
+      totalQuestionsChecked++;
 
-      if (q.type === 'fill_blank') {
+      const cueChunk = secChunks.find(c => c.questionNumber === q.number);
+      if (!cueChunk) {
+        allQuestionsCovered = false;
+        console.error(`Missing [[Q${q.number}]] cue chunk in ${test.id} sec ${sec.sectionNumber}`);
+      } else {
+        if (cueChunk.index < prevCuePos) {
+          allSectionsChronological = false;
+          console.error(`Out-of-order [[Q${q.number}]] cue in ${test.id} sec ${sec.sectionNumber}: chunk ${cueChunk.index} < prev ${prevCuePos}`);
+        }
+        prevCuePos = cueChunk.index;
+      }
+
+      if (q.type === 'multiple_choice') {
+        const opts = q.options || [];
+        const ansKey = String(q.correctAnswer).trim().toUpperCase();
+        const matchesOpt = opts.some(opt => {
+          const clean = opt.trim().toUpperCase();
+          return clean === ansKey || clean.startsWith(`${ansKey}.`) || clean.startsWith(`${ansKey}:`) || clean.startsWith(`${ansKey} `);
+        });
+        if (opts.length !== 4 || !matchesOpt || !q.explanation?.trim()) {
+          allMcqsValid = false;
+          console.error(`Invalid MCQ Q${q.number} in ${test.id} sec ${sec.sectionNumber}`);
+        }
+      } else {
         const answers = (Array.isArray(q.correctAnswer) ? q.correctAnswer : [q.correctAnswer]).map(a =>
           String(a).toLowerCase().trim()
         );
-        // Find earliest chunk >= prevPos matching answer (to confirm chronological progression!)
-        const sequentialMatch = secChunks.find(
-          c => c.index >= prevPos && answers.some(a => c.text.toLowerCase().includes(a))
-        );
-        if (sequentialMatch) {
-          matchedIndex = sequentialMatch.index;
-        }
-      } else {
-        const phrases = mcqKeyPhrases[q.number] || [];
-        const sequentialMatch = secChunks.find(
-          c => c.index >= prevPos && phrases.every(p => c.text.toLowerCase().includes(p))
-        );
-        if (sequentialMatch) {
-          matchedIndex = sequentialMatch.index;
-        } else {
-          // Allow phrase split across two adjacent chunks starting >= prevPos
-          for (let i = Math.max(0, prevPos); i < secChunks.length - 1; i++) {
-            const pair = `${secChunks[i].text} ${secChunks[i + 1].text}`.toLowerCase();
-            if (phrases.every(p => pair.includes(p))) {
-              matchedIndex = i;
-              break;
-            }
-          }
-        }
-      }
+        let matchedIndex = -1;
 
-      if (matchedIndex === -1) {
-        // Check if answer existed earlier (out of order) vs missing entirely
-        const anywhere = secChunks.findIndex(c => {
-          if (q.type === 'fill_blank') {
-            return c.text.toLowerCase().includes(String(q.correctAnswer).toLowerCase().trim());
+        for (let i = Math.max(0, prevAnswerPos); i < secChunks.length; i++) {
+          const single = secChunks[i].text.toLowerCase();
+          const pair = i + 1 < secChunks.length ? `${single} ${secChunks[i + 1].text.toLowerCase()}` : single;
+          if (answers.some(a => single.includes(a) || pair.includes(a))) {
+            matchedIndex = i;
+            break;
           }
-          const phrases = mcqKeyPhrases[q.number] || [];
-          return phrases.every(p => c.text.toLowerCase().includes(p));
-        });
-        if (anywhere === -1) {
-          allQuestionsCovered = false;
-          console.error(`Missing Q${q.number} (${q.correctAnswer}) in ${test.id} sec ${sec.sectionNumber}`);
-        } else {
-          allSectionsChronological = false;
-          console.error(`Out-of-order Q${q.number} in ${test.id} sec ${sec.sectionNumber}: found at chunk ${anywhere} < prevPos ${prevPos}`);
         }
-      } else {
-        prevPos = matchedIndex;
+
+        if (matchedIndex === -1) {
+          const anywhere = secChunks.findIndex((c, i) => {
+            const single = c.text.toLowerCase();
+            const pair = i + 1 < secChunks.length ? `${single} ${secChunks[i + 1].text.toLowerCase()}` : single;
+            return answers.some(a => single.includes(a) || pair.includes(a));
+          });
+          if (anywhere === -1) {
+            allQuestionsCovered = false;
+            console.error(`Missing Q${q.number} (${q.correctAnswer}) in ${test.id} sec ${sec.sectionNumber}`);
+          } else {
+            allSectionsChronological = false;
+            console.error(`Out-of-order Q${q.number} in ${test.id} sec ${sec.sectionNumber}: found at chunk ${anywhere} < prevPos ${prevAnswerPos}`);
+          }
+        } else {
+          prevAnswerPos = matchedIndex;
+        }
       }
     }
   }
 }
 
-assert(totalSectionsChecked === 200, `Validated all ${totalSectionsChecked} sections across ${LISTENING_TESTS.length} Listening tests`);
+assert(totalSectionsChecked === 200 && totalQuestionsChecked === 2000, `Validated all ${totalSectionsChecked} sections & ${totalQuestionsChecked} questions across ${LISTENING_TESTS.length} Listening tests`);
 assert(allSectionsValid && maxChunkLenSeen <= 155, `All 200 sections have 10 questions & safe chunks (len range: ${minChunkLenSeen}–${maxChunkLenSeen} chars)`);
-assert(allQuestionsCovered, 'Every single one of the 2,000 Listening questions (Q1–Q40 x 50 tests) is covered by its section audio chunks');
+assert(allQuestionsCovered && allMcqsValid, 'Every single one of the 2,000 Listening questions (Q1–Q40 x 50 tests) is valid & covered by its section audio chunks');
 assert(allSectionsChronological, 'All 200 Listening sections cover Q1→Q10, Q11→Q20, Q21→Q30, Q31→Q40 in strict chronological audio order');
 assert(estimateSpeechDurationSeconds([], 0.96) === 0, 'Empty chunks estimate 0s duration');
 

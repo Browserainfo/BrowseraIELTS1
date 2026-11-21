@@ -9,7 +9,8 @@ import {
   HelpCircle, 
   Volume2, 
   Play, 
-  Pause, 
+  Pause,
+  Square,
   Mic, 
   MicOff, 
   Flag, 
@@ -163,12 +164,12 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
   const activeListeningSection = currentListeningTest.sections[activeListeningSectionIndex] || currentListeningTest.sections[0];
   const playingListeningSection = currentListeningTest.sections[playingListeningSectionIndex] || currentListeningTest.sections[0];
   const listeningSectionKey = `${currentListeningTest.id}_sec_${playingListeningSectionIndex}`;
+  const completedListeningSectionsRef = useRef<Record<string, boolean>>({});
   const [completedListeningSections, setCompletedListeningSections] = useState<Record<string, boolean>>({});
   const [sectionTransitionNotice, setSectionTransitionNotice] = useState<string | null>(null);
-  const pendingAutoPlaySectionRef = useRef<boolean>(false);
-  const sectionTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Clear pending section auto-transition if exiting, submitting, or unmounting
+  // Clear pending section transition timers if exiting, submitting, or unmounting
+  const sectionTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     return () => {
       if (sectionTransitionTimerRef.current) {
@@ -178,7 +179,7 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
     };
   }, []);
 
-  // Reliable Listening audio playback with buffering/stall detection, auto-recovery & single-play lock
+  // Reliable Listening audio playback with Play/Pause/Resume/Stop, recovery & single-play per section (NO uncontrolled auto-roll)
   const listeningPlayer = useListeningAudioPlayer({
     sectionKey: listeningSectionKey,
     transcript: playingListeningSection?.transcript || '',
@@ -189,40 +190,23 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
     singlePlay: true,
     isLockedCompleted: Boolean(completedListeningSections[listeningSectionKey]),
     onSectionCompleted: (completedKey) => {
+      completedListeningSectionsRef.current = { ...completedListeningSectionsRef.current, [completedKey]: true };
       setCompletedListeningSections(prev => (prev[completedKey] ? prev : { ...prev, [completedKey]: true }));
 
-      // Transition sequentially to the next Listening section ONLY after full section audio completes
       const match = completedKey.match(/_sec_(\d+)$/);
       const finishedIdx = match ? parseInt(match[1], 10) : playingListeningSectionIndex;
       const nextIdx = finishedIdx + 1;
 
       if (nextIdx < currentListeningTest.sections.length) {
-        if (sectionTransitionTimerRef.current) {
-          clearTimeout(sectionTransitionTimerRef.current);
-        }
-        setSectionTransitionNotice(`Section ${finishedIdx + 1} complete — starting Section ${nextIdx + 1}...`);
-        sectionTransitionTimerRef.current = setTimeout(() => {
-          sectionTransitionTimerRef.current = null;
-          setSectionTransitionNotice(null);
-          pendingAutoPlaySectionRef.current = true;
-          setPlayingListeningSectionIndex(nextIdx);
-          setActiveListeningSectionIndex(nextIdx);
-          scrollToQuestion(nextIdx * 10 + 1, 'listening');
-        }, 1200);
+        const nextRange = `${nextIdx * 10 + 1}–${nextIdx * 10 + 10}`;
+        setSectionTransitionNotice(
+          `Section ${finishedIdx + 1} completed. Review your answers or select "Play Section ${nextIdx + 1} (Q ${nextRange})" when ready.`
+        );
       } else {
-        setSectionTransitionNotice(null);
+        setSectionTransitionNotice('All 4 Listening sections completed. Review your answers before clicking Finish Test.');
       }
     }
   });
-
-  // Trigger sequential playback cleanly once the next section has mounted and reset
-  useEffect(() => {
-    if (pendingAutoPlaySectionRef.current) {
-      pendingAutoPlaySectionRef.current = false;
-      listeningPlayer.startSectionPlayback();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playingListeningSectionIndex]);
 
   // Speaking specific state
   const [speakingPrepTime, setSpeakingPrepTime] = useState(60);
@@ -251,7 +235,10 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
     }
   };
 
-  // Countdown timer (pauses while pre-test hardware check is active)
+  // Auto-submit guard & Countdown timer (pauses while pre-test hardware check is active)
+  const autoSubmittedOnExpiryRef = useRef(false);
+  const handleSubmitTestRef = useRef<() => Promise<void>>(async () => {});
+
   useEffect(() => {
     if (assignedLoadError || secondsRemaining <= 0 || isTestSubmitted || pendingAudioCheckModule !== null) return;
     const timer = setInterval(() => {
@@ -259,6 +246,20 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
     }, 1000);
     return () => clearInterval(timer);
   }, [assignedLoadError, secondsRemaining, isTestSubmitted, pendingAudioCheckModule]);
+
+  useEffect(() => {
+    if (
+      secondsRemaining <= 0 &&
+      !assignedLoadError &&
+      !isTestSubmitted &&
+      !isSubmitting &&
+      pendingAudioCheckModule === null &&
+      !autoSubmittedOnExpiryRef.current
+    ) {
+      autoSubmittedOnExpiryRef.current = true;
+      void handleSubmitTestRef.current();
+    }
+  }, [secondsRemaining, assignedLoadError, isTestSubmitted, isSubmitting, pendingAudioCheckModule]);
 
   // Synchronize active passage/section when activeQuestionNumber changes (supports GT 1-14/15-27/28-40 & Academic 1-13/14-26/27-40)
   useEffect(() => {
@@ -300,7 +301,7 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
   };
 
   const handleAudioCheckCancelled = () => {
-    if ((initialModule === 'listening' || initialModule === 'speaking') && !verifiedAudioModules[initialModule]) {
+    if ((initialResolvedModule === 'listening' || initialResolvedModule === 'speaking') && !verifiedAudioModules[initialResolvedModule]) {
       onExit();
     } else {
       setPendingAudioCheckModule(null);
@@ -420,7 +421,7 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
         assignmentId,
         studentId: currentUser.id,
         studentName: currentUser.name,
-        candidateNumber: currentUser.candidateNumber || 'CD-2026-9042',
+        candidateNumber: currentUser.candidateNumber || (currentUser as any).studentId || 'CD-2026-9042',
         testTitle: isGt && !currentReadingTest.title.includes('General Training')
           ? currentReadingTest.title.replace('Academic', 'General Training')
           : currentReadingTest.title,
@@ -462,7 +463,7 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
         assignmentId,
         studentId: currentUser.id,
         studentName: currentUser.name,
-        candidateNumber: currentUser.candidateNumber || 'CD-2026-9042',
+        candidateNumber: currentUser.candidateNumber || (currentUser as any).studentId || 'CD-2026-9042',
         testTitle: currentListeningTest.title,
         courseType: currentListeningTest.courseType,
         module: 'listening',
@@ -488,7 +489,7 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
         assignmentId,
         studentId: currentUser.id,
         studentName: currentUser.name,
-        candidateNumber: currentUser.candidateNumber || 'CD-2026-9042',
+        candidateNumber: currentUser.candidateNumber || (currentUser as any).studentId || 'CD-2026-9042',
         testTitle: currentWritingTask.title,
         courseType: currentWritingTask.courseType,
         module: 'writing',
@@ -521,7 +522,7 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
         assignmentId,
         studentId: currentUser.id,
         studentName: currentUser.name,
-        candidateNumber: currentUser.candidateNumber || 'CD-2026-9042',
+        candidateNumber: currentUser.candidateNumber || (currentUser as any).studentId || 'CD-2026-9042',
         testTitle: speakingTest.title,
         courseType: 'ielts_academic',
         module: 'speaking',
@@ -535,7 +536,7 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
       };
     }
 
-    const hasAuthToken = typeof window !== 'undefined' && Boolean(localStorage.getItem('browsera_token'));
+    const hasAuthToken = typeof window !== 'undefined' && Boolean(apiService.getToken() || localStorage.getItem('browsera_auth_token') || (currentUser as any)?.role);
     if (hasAuthToken) {
       try {
         const saved = await apiService.submitTest(newSubmission);
@@ -553,6 +554,7 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
     setIsSubmitting(false);
     onTestCompleted(newSubmission);
   };
+  handleSubmitTestRef.current = handleSubmitTest;
 
   // Determine container styling based on accessibility choices
   const getContainerStyles = () => {
@@ -621,7 +623,7 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
 
           <div className="border-r border-slate-600 pr-4 hidden sm:block">
             <span className="text-[10px] uppercase tracking-wider text-slate-400 block">Candidate Number</span>
-            <span className="font-mono text-xs text-amber-400 font-bold">{currentUser.candidateNumber || 'CD-2026-9042'}</span>
+            <span className="font-mono text-xs text-amber-400 font-bold">{currentUser.candidateNumber || (currentUser as any).studentId || 'CD-2026-9042'}</span>
           </div>
 
           <div>
@@ -837,9 +839,13 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                           </span>
                           <span>
                             {q.type === 'true_false_not_given' && 'Do the following statements agree with the text? (TRUE / FALSE / NOT GIVEN)'}
-                            {q.type === 'fill_blank' && 'Complete the sentence with NO MORE THAN TWO WORDS:'}
+                            {q.type === 'yes_no_not_given' && 'Do the following statements agree with the claims of the writer? (YES / NO / NOT GIVEN)'}
+                            {q.type === 'fill_blank' && 'Complete the sentence with NO MORE THAN TWO WORDS AND/OR A NUMBER:'}
+                            {q.type === 'summary_completion' && 'Complete the summary with NO MORE THAN TWO WORDS from the passage:'}
+                            {q.type === 'short_answer' && 'Answer the question using NO MORE THAN THREE WORDS AND/OR A NUMBER:'}
                             {q.type === 'multiple_choice' && 'Choose the correct letter (A, B, C, or D):'}
-                            {q.type === 'matching_headings' && 'Match the following statements to the correct category:'}
+                            {q.type === 'matching_headings' && 'Choose the correct heading for the paragraph:'}
+                            {q.type === 'matching_information' && 'Which paragraph contains the following information?'}
                           </span>
                         </span>
 
@@ -877,8 +883,31 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                         </div>
                       )}
 
-                      {/* Fill in Blank Input */}
-                      {q.type === 'fill_blank' && (
+                      {/* Yes/No/Not Given Options */}
+                      {q.type === 'yes_no_not_given' && (
+                        <div className="flex flex-wrap gap-2 text-xs">
+                          {['YES', 'NO', 'NOT GIVEN'].map((opt) => (
+                            <button
+                              key={opt}
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleSelectAnswer(q.number, opt);
+                              }}
+                              className={`px-3.5 py-2 rounded-lg border cursor-pointer font-bold transition flex items-center gap-1.5 select-none ${
+                                userAnswers[q.number] === opt
+                                  ? 'bg-amber-500 border-amber-600 text-slate-950 shadow-sm'
+                                  : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100 hover:border-slate-400'
+                              }`}
+                            >
+                              <span>{opt}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Fill in Blank / Summary Completion / Short Answer Input */}
+                      {(q.type === 'fill_blank' || q.type === 'summary_completion' || q.type === 'short_answer') && (
                         <div>
                           <input
                             type="text"
@@ -888,6 +917,39 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                             onClick={(e) => e.stopPropagation()}
                             className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:outline-none"
                           />
+                        </div>
+                      )}
+
+                      {/* Matching Headings / Matching Information Options */}
+                      {(q.type === 'matching_headings' || q.type === 'matching_information') && q.options && (
+                        <div className="space-y-1.5 text-xs">
+                          {q.options.map((opt, i) => {
+                            const keyMatch = opt.match(/^([ivx]+|[A-H])(?:[\.\:\)\s-]+|$)/i);
+                            const optionKey = keyMatch ? keyMatch[1].trim() : opt.trim();
+                            const isSelected = (userAnswers[q.number] || '').toLowerCase() === optionKey.toLowerCase();
+                            return (
+                              <button
+                                key={i}
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleSelectAnswer(q.number, optionKey);
+                                }}
+                                className={`w-full text-left p-2.5 rounded-lg border cursor-pointer transition flex items-center gap-2 select-none ${
+                                  isSelected
+                                    ? 'bg-amber-50 border-amber-400 font-semibold text-slate-900 ring-1 ring-amber-400 shadow-sm'
+                                    : 'border-slate-200 hover:bg-slate-50 text-slate-700 hover:border-slate-300'
+                                }`}
+                              >
+                                <span className={`min-w-[1.5rem] h-6 px-1.5 rounded flex items-center justify-center font-bold text-xs border ${
+                                  isSelected ? 'border-amber-600 bg-amber-500 text-slate-950' : 'border-slate-300 bg-white text-slate-600'
+                                }`}>
+                                  {optionKey}
+                                </span>
+                                <span>{opt.replace(/^([ivx]+|[A-H])[\.\:\)\s-]+/i, '')}</span>
+                              </button>
+                            );
+                          })}
                         </div>
                       )}
 
@@ -932,148 +994,242 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
           </>
         )}
 
-        {/* ================= LISTENING MODULE (40 QUESTIONS ACROSS 4 SECTIONS) ================= */}
+        {/* ================= LISTENING MODULE (40 QUESTIONS ACROSS 4 SEPARATED SECTIONS) ================= */}
         {activeModule === 'listening' && (
           <>
-            {/* Left Column: Simulated Audio Player & Section Scenario */}
+            {/* Left Column: Section-Based Audio Player & Section Selector */}
             <div className="w-full lg:w-1/2 h-full min-h-0 p-6 overflow-y-auto border-r border-slate-300 bg-white space-y-4 pb-16">
               
-              {/* Section Tabs */}
-              <div className="flex items-center gap-2 border-b border-slate-200 pb-3 overflow-x-auto sticky top-0 bg-white z-10">
+              {/* Clearly Separated 4 Sections Navigation Tabs */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 border-b border-slate-200 pb-3 sticky top-0 bg-white z-10">
                 {currentListeningTest.sections.map((s, idx) => {
-                  const isSelected = activeListeningSectionIndex === idx;
-                  const isAudioActive = playingListeningSectionIndex === idx;
-                  const qRange = idx === 0 ? '1–10' : idx === 1 ? '11–20' : idx === 2 ? '21–30' : '31–40';
+                  const isViewed = activeListeningSectionIndex === idx;
+                  const isAudioLoaded = playingListeningSectionIndex === idx;
+                  const secKey = `${currentListeningTest.id}_sec_${idx}`;
+                  const isSecDone = Boolean(completedListeningSections[secKey]);
+                  const qRange = `${idx * 10 + 1}–${idx * 10 + 10}`;
                   return (
                     <button
                       key={idx}
                       type="button"
                       onClick={() => {
                         setActiveListeningSectionIndex(idx);
-                        // Allow inspecting questions anytime; only switch audio track if playback is NOT currently active
                         if (!listeningPlayer.isPlaying) {
-                          if (sectionTransitionTimerRef.current) {
-                            clearTimeout(sectionTransitionTimerRef.current);
-                            sectionTransitionTimerRef.current = null;
-                          }
                           setSectionTransitionNotice(null);
                           setPlayingListeningSectionIndex(idx);
                         }
-                        const targetQ = idx * 10 + 1;
-                        scrollToQuestion(targetQ, 'listening');
+                        scrollToQuestion(idx * 10 + 1, 'listening');
                       }}
-                      className={`px-3 py-1.5 rounded-lg font-bold text-xs transition cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                        isSelected 
-                          ? 'bg-sky-500 text-white shadow-sm' 
-                          : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                      className={`p-2 rounded-xl border text-left transition cursor-pointer ${
+                        isViewed
+                          ? 'bg-sky-50 border-sky-500 ring-1 ring-sky-400'
+                          : isAudioLoaded && listeningPlayer.isPlaying
+                            ? 'bg-amber-50 border-amber-400'
+                            : 'bg-slate-50 hover:bg-slate-100 border-slate-200'
                       }`}
                     >
-                      <Headphones className="w-3.5 h-3.5" />
-                      <span>
-                        Section {idx + 1} (Q {qRange}){isAudioActive && listeningPlayer.isPlaying ? ' • Playing' : ''}
-                      </span>
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-bold text-[11px] text-slate-900">Section {idx + 1}</span>
+                        {isSecDone ? (
+                          <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">Done</span>
+                        ) : isAudioLoaded && listeningPlayer.isPlaying ? (
+                          <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500 text-slate-950">Playing</span>
+                        ) : isAudioLoaded && listeningPlayer.status === 'paused' ? (
+                          <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-sky-100 text-sky-800">Paused</span>
+                        ) : (
+                          <span className="text-[9px] font-semibold text-slate-400">Ready</span>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-slate-600 font-medium mt-0.5">Questions {qRange}</div>
                     </button>
                   );
                 })}
               </div>
 
-              <div className="border-b border-slate-200 pb-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-sky-600">
-                  SECTION {playingListeningSectionIndex + 1} AUDIO STREAM
-                </span>
-                <h1 className="text-xl font-bold text-slate-900 mt-1">
+              {/* Prominent Current Section & Question Range Header */}
+              <div className="border-b border-slate-200 pb-3 space-y-1">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-sky-700 bg-sky-50 px-2.5 py-0.5 rounded border border-sky-200">
+                    Section {playingListeningSectionIndex + 1} of 4 • Questions {playingListeningSectionIndex * 10 + 1}–{playingListeningSectionIndex * 10 + 10}
+                  </span>
+                  {listeningPlayer.currentQuestionNumber !== null && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const qSection = Math.min(3, Math.floor((listeningPlayer.currentQuestionNumber! - 1) / 10));
+                        setActiveListeningSectionIndex(qSection);
+                        scrollToQuestion(listeningPlayer.currentQuestionNumber!, 'listening');
+                      }}
+                      className="text-[11px] font-bold bg-amber-500 text-slate-950 px-2.5 py-0.5 rounded-full flex items-center gap-1 cursor-pointer hover:bg-amber-400 transition"
+                    >
+                      <Radio className="w-3 h-3" />
+                      <span>
+                        Audio Covering Question {listeningPlayer.currentQuestionNumber}
+                        {listeningPlayer.currentSpeaker ? ` (${listeningPlayer.currentSpeaker})` : ''}
+                      </span>
+                    </button>
+                  )}
+                </div>
+                <h1 className="text-lg font-bold text-slate-900 mt-1">
                   {playingListeningSection.title}
                 </h1>
-                <p className="text-xs text-slate-500 mt-1">
+                <p className="text-xs text-slate-500">
                   {playingListeningSection.audioScenario}
                 </p>
               </div>
 
-              {/* Listening Audio Player */}
-              <div className="bg-slate-900 text-white p-5 rounded-2xl border border-slate-800 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (sectionTransitionTimerRef.current) {
-                          clearTimeout(sectionTransitionTimerRef.current);
-                          sectionTransitionTimerRef.current = null;
-                        }
-                        setSectionTransitionNotice(null);
-                        listeningPlayer.togglePlayPause();
-                      }}
-                      disabled={listeningPlayer.isLockedCompleted}
-                      aria-label={
-                        listeningPlayer.isLockedCompleted
-                          ? 'Section audio already played once'
-                          : listeningPlayer.isPlaying
-                            ? 'Pause listening audio'
-                            : 'Play listening audio'
-                      }
-                      className={`w-10 h-10 rounded-full flex items-center justify-center transition shadow ${
-                        listeningPlayer.isLockedCompleted
-                          ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
-                          : 'bg-amber-500 hover:bg-amber-400 text-slate-950 cursor-pointer'
-                      }`}
-                    >
-                      {listeningPlayer.isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
-                    </button>
-                    <div>
-                      <div className="text-xs font-bold">Track 0{playingListeningSectionIndex + 1}: {playingListeningSection.title}</div>
-                      <div className="text-[10px] text-slate-400">
-                        Duration: {formatAudioTime(listeningPlayer.elapsedSeconds)} / {formatAudioTime(listeningPlayer.totalDurationSeconds)} • Clear British / Australian Accent • Single Play
-                        {sectionTransitionNotice ? (
-                          <span className="ml-2 text-sky-400 font-semibold">• {sectionTransitionNotice}</span>
-                        ) : listeningPlayer.isLockedCompleted ? (
-                          <span className="ml-2 text-emerald-400 font-semibold">• Played Once (Completed)</span>
-                        ) : listeningPlayer.status === 'error' ? (
-                          <button
-                            type="button"
-                            onClick={listeningPlayer.togglePlayPause}
-                            className="ml-2 text-amber-400 hover:text-amber-300 underline font-semibold cursor-pointer"
-                          >
-                            • Resume Audio
-                          </button>
-                        ) : listeningPlayer.recoveryNotice ? (
-                          <span className="ml-2 text-amber-400 font-semibold">• {listeningPlayer.recoveryNotice}</span>
-                        ) : null}
-                      </div>
+              {/* Listening Audio Player with Play, Pause, Resume, Stop & Remaining Time */}
+              <div className="bg-slate-900 text-white p-5 rounded-2xl border border-slate-800 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-bold flex items-center gap-2">
+                      <Volume2 className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span>Section {playingListeningSectionIndex + 1} Track: {playingListeningSection.title}</span>
+                    </div>
+                    <div className="text-[11px] text-slate-300 mt-1 flex flex-wrap items-center gap-2">
+                      <span className="font-mono">
+                        Elapsed: {formatAudioTime(listeningPlayer.elapsedSeconds)}
+                      </span>
+                      <span className="text-slate-600">•</span>
+                      <span className="font-mono text-amber-300">
+                        Remaining: {formatAudioTime(listeningPlayer.remainingSeconds)}
+                      </span>
+                      <span className="text-slate-600">•</span>
+                      <span className="font-mono text-slate-400">
+                        Total: {formatAudioTime(listeningPlayer.totalDurationSeconds)}
+                      </span>
+                      <span className="text-slate-600">•</span>
+                      <span className="font-semibold text-sky-300">
+                        {Math.round(listeningPlayer.progressPercent)}%
+                      </span>
                     </div>
                   </div>
-                  <Volume2 className="w-5 h-5 text-slate-400" />
                 </div>
 
-                <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+                {/* Clear Explicit Audio Controls: Play, Pause, Resume, Stop */}
+                <div className="flex flex-wrap items-center gap-2">
+                  {listeningPlayer.isLockedCompleted ? (
+                    <span className="px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-xs font-bold flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>Section {playingListeningSectionIndex + 1} Completed (Single-Play Rule)</span>
+                    </span>
+                  ) : (
+                    <>
+                      {listeningPlayer.status === 'idle' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSectionTransitionNotice(null);
+                            listeningPlayer.startPlayback();
+                          }}
+                          className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer transition shadow"
+                        >
+                          <Play className="w-3.5 h-3.5 fill-current" />
+                          <span>Play Section {playingListeningSectionIndex + 1}</span>
+                        </button>
+                      )}
+
+                      {listeningPlayer.isPlaying && (
+                        <button
+                          type="button"
+                          onClick={listeningPlayer.pausePlayback}
+                          className="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer transition shadow"
+                        >
+                          <Pause className="w-3.5 h-3.5" />
+                          <span>Pause</span>
+                        </button>
+                      )}
+
+                      {(listeningPlayer.status === 'paused' || listeningPlayer.status === 'error') && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSectionTransitionNotice(null);
+                            listeningPlayer.resumePlayback();
+                          }}
+                          className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer transition shadow"
+                        >
+                          <Play className="w-3.5 h-3.5 fill-current" />
+                          <span>Resume Audio</span>
+                        </button>
+                      )}
+
+                      {listeningPlayer.status !== 'idle' && (
+                        <button
+                          type="button"
+                          onClick={listeningPlayer.stopPlayback}
+                          className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold text-xs flex items-center gap-1.5 cursor-pointer transition"
+                        >
+                          <Square className="w-3 h-3 fill-current" />
+                          <span>Stop</span>
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                <div className="w-full bg-slate-800 h-2.5 rounded-full overflow-hidden">
                   <div
                     className="h-full bg-amber-400 transition-all duration-300"
                     style={{ width: `${listeningPlayer.progressPercent}%` }}
                   ></div>
                 </div>
+
+                {/* Status / Recovery / Section Complete Next-Step Notice */}
+                {(listeningPlayer.recoveryNotice || sectionTransitionNotice) && (
+                  <div className="bg-slate-800/80 border border-slate-700 rounded-xl p-3 text-xs flex flex-wrap items-center justify-between gap-2">
+                    <span className={listeningPlayer.status === 'error' ? 'text-amber-300 font-semibold' : 'text-sky-300 font-medium'}>
+                      {listeningPlayer.recoveryNotice || sectionTransitionNotice}
+                    </span>
+                    {listeningPlayer.isLockedCompleted && playingListeningSectionIndex + 1 < currentListeningTest.sections.length && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const nextIdx = playingListeningSectionIndex + 1;
+                          setSectionTransitionNotice(null);
+                          setPlayingListeningSectionIndex(nextIdx);
+                          setActiveListeningSectionIndex(nextIdx);
+                          scrollToQuestion(nextIdx * 10 + 1, 'listening');
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] flex items-center gap-1 cursor-pointer transition"
+                      >
+                        <span>Load Section {playingListeningSectionIndex + 2} (Q {playingListeningSectionIndex * 10 + 11}–{playingListeningSectionIndex * 10 + 20})</span>
+                        <ArrowRight className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Listening Instructions & Context Box (Transcript hidden during active exam) */}
               <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 text-xs text-slate-700 space-y-2">
                 <span className="font-bold text-slate-900 uppercase tracking-wider text-[10px]">
-                  Exam Listening Instructions & Context
+                  Section {activeListeningSectionIndex + 1} Instructions & Context (Questions {activeListeningSectionIndex * 10 + 1}–{activeListeningSectionIndex * 10 + 10})
                 </span>
                 <p className="text-slate-600 leading-relaxed text-[11px]">
                   {activeListeningSection.audioScenario}
                 </p>
                 <p className="text-slate-500 text-[11px] border-t border-slate-200 pt-2">
-                  You will hear this recording once only. Answers appear in order as you listen, and the full audio transcript remains hidden during the active exam.
+                  Each section plays once cleanly in sequence. Questions appear in chronological order as the audio plays. You may switch question tabs freely without interrupting audio playback. Full transcripts remain hidden until submission.
                 </p>
               </div>
             </div>
 
-            {/* Right Column: All 40 Listening Questions */}
+            {/* Right Column: Section Listening Questions */}
             <div ref={listeningQuestionsRef} className="w-full lg:w-1/2 h-full min-h-0 p-6 overflow-y-auto bg-slate-50">
               <div className="max-w-2xl mx-auto space-y-4 pb-16">
                 
-                <div className="bg-sky-50 p-3 rounded-xl border border-sky-200 text-xs text-sky-900 flex items-center justify-between sticky top-0 bg-sky-50/95 backdrop-blur z-10 shadow-sm">
-                  <span className="font-semibold">
-                    Listening Assessment: Section {activeListeningSectionIndex + 1} (Questions {activeListeningSectionIndex * 10 + 1}–{activeListeningSectionIndex * 10 + 10})
-                  </span>
+                <div className="bg-sky-50 p-3 rounded-xl border border-sky-200 text-xs text-sky-900 flex flex-wrap items-center justify-between gap-2 sticky top-0 bg-sky-50/95 backdrop-blur z-10 shadow-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold">
+                      Section {activeListeningSectionIndex + 1} (Questions {activeListeningSectionIndex * 10 + 1}–{activeListeningSectionIndex * 10 + 10})
+                    </span>
+                    {listeningPlayer.currentQuestionNumber !== null && (
+                      <span className="bg-amber-100 text-amber-900 border border-amber-300 font-bold text-[10px] px-2 py-0.5 rounded-full">
+                        Audio Cue: Q{listeningPlayer.currentQuestionNumber}
+                      </span>
+                    )}
+                  </div>
                   <button
                     type="button"
                     onClick={() => toggleFlag(activeQuestionNumber)}
@@ -1089,14 +1245,18 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                 </div>
 
                 {/* Render questions for active section */}
-                {activeListeningSection.questions.map(q => (
+                {activeListeningSection.questions.map(q => {
+                  const isAudioCovering = listeningPlayer.currentQuestionNumber === q.number;
+                  return (
                   <div 
                     key={q.id} 
                     id={`lq_anchor_${q.number}`}
                     className={`p-4 bg-white rounded-xl border transition ${
-                      activeQuestionNumber === q.number
-                        ? 'border-sky-500 shadow-md ring-1 ring-sky-400'
-                        : 'border-slate-200'
+                      isAudioCovering
+                        ? 'border-amber-500 shadow-md ring-2 ring-amber-400'
+                        : activeQuestionNumber === q.number
+                          ? 'border-sky-500 shadow-md ring-1 ring-sky-400'
+                          : 'border-slate-200'
                     }`}
                     onClick={() => setActiveQuestionNumber(q.number)}
                   >
@@ -1107,13 +1267,25 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                         }`}>
                           {q.number}
                         </span>
-                        <span>{q.type === 'fill_blank' ? 'Complete the notes with NO MORE THAN TWO WORDS AND/OR A NUMBER:' : 'Choose the correct letter (A, B, C, or D):'}</span>
+                        <span>
+                          {q.type === 'fill_blank' || q.type === 'summary_completion'
+                            ? 'Complete the notes with NO MORE THAN TWO WORDS AND/OR A NUMBER:'
+                            : q.type === 'short_answer'
+                              ? 'Answer with NO MORE THAN THREE WORDS AND/OR A NUMBER:'
+                              : 'Choose the correct letter:'}
+                        </span>
                       </span>
+                      {isAudioCovering && (
+                        <span className="text-[10px] font-bold bg-amber-500 text-slate-950 px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1">
+                          <Radio className="w-3 h-3" />
+                          <span>Covering Now</span>
+                        </span>
+                      )}
                     </div>
 
                     <p className="text-xs text-slate-700 mb-2 font-medium">{q.questionText}</p>
                     
-                    {q.type === 'fill_blank' ? (
+                    {(q.type === 'fill_blank' || q.type === 'summary_completion' || q.type === 'short_answer') ? (
                       <input
                         type="text"
                         placeholder="Type answer..."
@@ -1153,7 +1325,8 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                       </div>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </>
@@ -1449,6 +1622,7 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                 const isAnswered = Boolean(userAnswers[q.number]);
                 const isFlagged = Boolean(flaggedQuestions[q.number]);
                 const isActive = activeQuestionNumber === q.number;
+                const isAudioCovering = activeModule === 'listening' && listeningPlayer.currentQuestionNumber === q.number;
 
                 return (
                   <button
@@ -1458,6 +1632,8 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                     className={`w-7 h-7 rounded text-[11px] font-bold relative transition flex items-center justify-center cursor-pointer flex-shrink-0 ${
                       isActive 
                         ? 'bg-amber-500 text-slate-950 ring-2 ring-white' 
+                        : isAudioCovering
+                        ? 'bg-sky-600 text-white ring-2 ring-amber-400'
                         : isAnswered 
                         ? 'bg-slate-700 text-white border border-slate-500' 
                         : 'bg-slate-800 text-slate-400 border border-slate-700 hover:bg-slate-700'
@@ -1466,6 +1642,9 @@ export const CdIeltsExamSimulator: React.FC<CdIeltsExamSimulatorProps> = ({
                     <span>{q.number}</span>
                     {isFlagged && (
                       <span className="w-2 h-2 rounded-full bg-amber-400 absolute -top-1 -right-1"></span>
+                    )}
+                    {isAudioCovering && !isFlagged && (
+                      <span className="w-2 h-2 rounded-full bg-sky-300 animate-pulse absolute -top-1 -right-1"></span>
                     )}
                   </button>
                 );

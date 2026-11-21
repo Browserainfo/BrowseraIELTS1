@@ -87,6 +87,11 @@ export interface SubmissionRecord {
   feedbackNotes?: string;
   aiReport?: any;
   teacherReviewed?: boolean;
+  teacherAdjustedBand?: number;
+  teacherFeedbackNotes?: string;
+  teacherId?: string;
+  teacherName?: string;
+  reviewedAt?: string;
 }
 
 export interface SessionRecord {
@@ -602,9 +607,9 @@ export class Database {
     return this.data.users[idx];
   }
 
-  // Test Library
+  // Test Library (always reads directly from up-to-date ALL_TESTS without overwriting stored DB)
   public getTestLibrary(filter?: { courseType?: string; testType?: string; module?: string }): TestItem[] {
-    let result = this.data.test_library;
+    let result = ALL_TESTS;
     if (filter?.courseType) {
       const cType = filter.courseType.toLowerCase();
       result = result.filter(t => {
@@ -1048,7 +1053,38 @@ export class Database {
 
   public getSubmissions(studentId?: string): SubmissionRecord[] {
     if (!studentId) return this.data.submissions;
-    return this.data.submissions.filter(s => s.studentId === studentId || s.candidateNumber === studentId);
+    const studentUser = this.findStudentByStudentId(studentId) || this.findUserById(studentId);
+    const studentKeys = new Set(
+      [studentId, studentUser?.id, studentUser?.studentId].filter(Boolean) as string[]
+    );
+    return this.data.submissions.filter(s =>
+      studentKeys.has(s.studentId) || studentKeys.has(s.candidateNumber)
+    );
+  }
+
+  public updateSubmissionReview(
+    submissionId: string,
+    review: {
+      teacherId: string;
+      teacherName: string;
+      adjustedBand: number;
+      feedbackNotes: string;
+    }
+  ): SubmissionRecord | null {
+    const sub = this.data.submissions.find(s => s.id === submissionId);
+    if (!sub) return null;
+
+    sub.teacherReviewed = true;
+    sub.teacherId = review.teacherId;
+    sub.teacherName = review.teacherName;
+    sub.teacherAdjustedBand = review.adjustedBand;
+    sub.overallBand = review.adjustedBand;
+    sub.teacherFeedbackNotes = review.feedbackNotes;
+    sub.feedbackNotes = review.feedbackNotes;
+    sub.reviewedAt = new Date().toISOString().replace('T', ' ').substring(0, 16);
+
+    this.save();
+    return sub;
   }
 
   // Sessions

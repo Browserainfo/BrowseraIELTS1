@@ -34,8 +34,15 @@ export interface ListeningAudioPlayerState {
   isLockedCompleted: boolean;
   progressPercent: number;
   elapsedSeconds: number;
+  remainingSeconds: number;
   totalDurationSeconds: number;
+  currentQuestionNumber: number | null;
+  currentSpeaker: string | null;
   recoveryNotice: string | null;
+  startPlayback: () => void;
+  pausePlayback: () => void;
+  resumePlayback: () => void;
+  stopPlayback: () => void;
   togglePlayPause: () => void;
   startSectionPlayback: () => void;
   restartTrack: () => void;
@@ -75,6 +82,8 @@ export function useListeningAudioPlayer({
   const [status, setStatus] = useState<AudioPlaybackStatus>('idle');
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
+  const [currentQuestionNumber, setCurrentQuestionNumber] = useState<number | null>(null);
+  const [currentSpeaker, setCurrentSpeaker] = useState<string | null>(null);
   const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
   const [lockedCompleted, setLockedCompleted] = useState<boolean>(isLockedCompleted);
 
@@ -218,6 +227,8 @@ export function useListeningAudioPlayer({
     clearPlaybackTimers();
     updateProgress(100);
     updateElapsed(totalDurationRef.current);
+    setCurrentQuestionNumber(null);
+    setCurrentSpeaker(null);
     setRecoveryNotice(null);
     updateStatus('completed');
 
@@ -330,6 +341,10 @@ export function useListeningAudioPlayer({
       transitionPendingRef.current = false;
       speechStartedRef.current = false;
       chunkStartedAtRef.current = Date.now();
+      setCurrentSpeaker(chunk.speaker || null);
+      if (typeof chunk.questionNumber === 'number') {
+        setCurrentQuestionNumber(chunk.questionNumber);
+      }
       updateStatus('playing');
       setRecoveryNotice(null);
 
@@ -338,6 +353,10 @@ export function useListeningAudioPlayer({
         speechStartedRef.current = true;
         chunkStartedAtRef.current = Date.now();
         chunkRetriesRef.current = 0;
+        setCurrentSpeaker(chunk.speaker || null);
+        if (typeof chunk.questionNumber === 'number') {
+          setCurrentQuestionNumber(chunk.questionNumber);
+        }
         updateStatus('playing');
         setRecoveryNotice(null);
       };
@@ -767,6 +786,45 @@ export function useListeningAudioPlayer({
     saveSnapshot(sectionKeyRef.current, false);
   }, [cancelSpeechEngine, clearPlaybackTimers, saveSnapshot, updateStatus]);
 
+  const stopPlayback = useCallback(() => {
+    shouldBePlayingRef.current = false;
+    stopAllAudioHardware();
+    if (lockedCompletedRef.current || statusRef.current === 'completed') {
+      setRecoveryNotice(null);
+      updateStatus('completed');
+      return;
+    }
+    currentChunkIndexRef.current = 0;
+    lastAudioTimeRef.current = 0;
+    chunkRetriesRef.current = 0;
+    audioRetriesRef.current = 0;
+    setCurrentQuestionNumber(null);
+    setCurrentSpeaker(null);
+    updateElapsed(0);
+    updateProgress(0);
+    setRecoveryNotice(null);
+    updateStatus('idle');
+    saveSnapshot(sectionKeyRef.current, false);
+  }, [saveSnapshot, stopAllAudioHardware, updateElapsed, updateProgress, updateStatus]);
+
+  const startPlayback = useCallback(() => {
+    if (!isActive) return;
+    if (singlePlay && (lockedCompletedRef.current || statusRef.current === 'completed')) {
+      return;
+    }
+    if (!shouldBePlayingRef.current && statusRef.current !== 'playing') {
+      startPlaybackFromCurrentPosition();
+    }
+  }, [isActive, singlePlay, startPlaybackFromCurrentPosition]);
+
+  const resumePlayback = useCallback(() => {
+    if (!isActive) return;
+    if (singlePlay && (lockedCompletedRef.current || statusRef.current === 'completed')) {
+      return;
+    }
+    startPlaybackFromCurrentPosition();
+  }, [isActive, singlePlay, startPlaybackFromCurrentPosition]);
+
   const togglePlayPause = useCallback(() => {
     if (!isActive) return;
     if (singlePlay && (lockedCompletedRef.current || statusRef.current === 'completed')) {
@@ -780,14 +838,8 @@ export function useListeningAudioPlayer({
   }, [isActive, pausePlayback, singlePlay, startPlaybackFromCurrentPosition]);
 
   const startSectionPlayback = useCallback(() => {
-    if (!isActive) return;
-    if (singlePlay && (lockedCompletedRef.current || statusRef.current === 'completed')) {
-      return;
-    }
-    if (!shouldBePlayingRef.current && statusRef.current !== 'playing') {
-      startPlaybackFromCurrentPosition();
-    }
-  }, [isActive, singlePlay, startPlaybackFromCurrentPosition]);
+    startPlayback();
+  }, [startPlayback]);
 
   const restartTrack = useCallback(() => {
     if (singlePlay && (lockedCompletedRef.current || currentChunkIndexRef.current > 0 || progressPercentRef.current > 0)) {
@@ -798,6 +850,8 @@ export function useListeningAudioPlayer({
     currentChunkIndexRef.current = 0;
     lastAudioTimeRef.current = 0;
     chunkRetriesRef.current = 0;
+    setCurrentQuestionNumber(null);
+    setCurrentSpeaker(null);
     updateElapsed(0);
     updateProgress(0);
     setRecoveryNotice(null);
@@ -842,6 +896,8 @@ export function useListeningAudioPlayer({
       setLockedCompleted(true);
       currentChunkIndexRef.current = chunksRef.current.length;
       lastAudioTimeRef.current = defaultTrackDuration;
+      setCurrentQuestionNumber(null);
+      setCurrentSpeaker(null);
       updateElapsed(defaultTrackDuration);
       updateProgress(100);
       setRecoveryNotice(null);
@@ -851,6 +907,9 @@ export function useListeningAudioPlayer({
       setLockedCompleted(false);
       currentChunkIndexRef.current = saved.chunkIndex;
       lastAudioTimeRef.current = saved.audioTime;
+      const savedChunk = chunksRef.current[saved.chunkIndex];
+      setCurrentQuestionNumber(savedChunk?.questionNumber ?? null);
+      setCurrentSpeaker(savedChunk?.speaker ?? null);
       updateElapsed(saved.elapsedSeconds);
       updateProgress(saved.progressPercent);
       setRecoveryNotice(null);
@@ -860,6 +919,8 @@ export function useListeningAudioPlayer({
       setLockedCompleted(false);
       currentChunkIndexRef.current = 0;
       lastAudioTimeRef.current = 0;
+      setCurrentQuestionNumber(null);
+      setCurrentSpeaker(null);
       updateElapsed(0);
       updateProgress(0);
       setRecoveryNotice(null);
@@ -901,14 +962,23 @@ export function useListeningAudioPlayer({
     };
   }, [stopAllAudioHardware]);
 
+  const remainingSeconds = Math.max(0, totalDurationSeconds - elapsedSeconds);
+
   return {
     status,
     isPlaying: status === 'playing' || status === 'recovering',
     isLockedCompleted: lockedCompleted,
     progressPercent,
     elapsedSeconds,
+    remainingSeconds,
     totalDurationSeconds,
+    currentQuestionNumber,
+    currentSpeaker,
     recoveryNotice,
+    startPlayback,
+    pausePlayback,
+    resumePlayback,
+    stopPlayback,
     togglePlayPause,
     startSectionPlayback,
     restartTrack

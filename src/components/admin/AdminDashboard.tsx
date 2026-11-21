@@ -54,7 +54,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [programsMenuOpen, setProgramsMenuOpen] = useState(true);
 
   // Test Library Filters
-  const [testFilterCourse, setTestFilterCourse] = useState<'all' | 'CD-IELTS' | 'PTE Academic'>('all');
+  const [testFilterCourse, setTestFilterCourse] = useState<'all' | 'CD-IELTS' | 'CD-IELTS General Training' | 'PTE Academic'>('all');
   const [testFilterType, setTestFilterType] = useState<'all' | 'practice' | 'mock'>('all');
   const [testFilterModule, setTestFilterModule] = useState<string>('all');
   const [testSearchQuery, setTestSearchQuery] = useState<string>('');
@@ -494,7 +494,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           {/* VIEW: TEST LIBRARY (250 Tests: 30 Practice + 20 Mock across IELTS & PTE) */}
           {activeRoute === 'test_library' && (() => {
             const filteredTests = tests.filter(t => {
-              const matchesCourse = testFilterCourse === 'all' || t.courseType === testFilterCourse;
+              const matchesCourse =
+                testFilterCourse === 'all' ||
+                (testFilterCourse === 'PTE Academic'
+                  ? (t.courseType || '').includes('PTE')
+                  : t.courseType === testFilterCourse);
               const matchesType = testFilterType === 'all' || t.testType === testFilterType;
               const matchesModule = testFilterModule === 'all' || t.module.toLowerCase() === testFilterModule.toLowerCase();
               const matchesSearch = !testSearchQuery.trim() || 
@@ -538,7 +542,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <div className="bg-[#1c2431] border border-slate-700 p-4 rounded-xl space-y-3">
                   <div className="flex flex-wrap items-center gap-2 text-xs">
                     <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mr-2">Course:</span>
-                    {(['all', 'CD-IELTS', 'PTE Academic'] as const).map(c => (
+                    {(['all', 'CD-IELTS', 'CD-IELTS General Training', 'PTE Academic'] as const).map(c => (
                       <button
                         key={c}
                         onClick={() => setTestFilterCourse(c)}
@@ -546,7 +550,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           testFilterCourse === c ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
                         }`}
                       >
-                        {c === 'all' ? 'All Courses' : c}
+                        {c === 'all' ? 'All Courses' : c === 'CD-IELTS' ? 'CD-IELTS Academic' : c}
                       </button>
                     ))}
 
@@ -598,13 +602,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         <span>Total Questions: {test.totalQuestions}</span>
                         <button
                           onClick={() => {
-                            if (test.courseType === 'CD-IELTS' && onLaunchCdIelts) {
+                            if ((test.courseType || '').includes('CD-IELTS') && onLaunchCdIelts) {
                               const mod = test.module.toLowerCase() === 'writing' ? 'writing'
                                 : test.module.toLowerCase() === 'listening' ? 'listening'
                                 : test.module.toLowerCase() === 'speaking' ? 'speaking'
                                 : 'reading';
                               onLaunchCdIelts(mod, test.id);
-                            } else if (test.courseType.includes('PTE') && onLaunchPte) {
+                            } else if ((test.courseType || '').includes('PTE') && onLaunchPte) {
                               onLaunchPte(test.id);
                             }
                           }}
